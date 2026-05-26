@@ -1,0 +1,5 @@
+packages:
+  - packages/*
+  - services/ov-api
+  - services/ov-telegram
+  - services/ov-dashboard

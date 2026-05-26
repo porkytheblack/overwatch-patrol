@@ -1,0 +1,81 @@
+services:
+  ov-bridge:
+    build: ./services/ov-bridge
+    network_mode: host
+    volumes:
+      - ./data:/data
+    environment:
+      LCM_URL: ${LCM_URL:-udpm://239.255.76.67:7667?ttl=1}
+      SQLITE_PATH: /data/overwatch.db
+      WS_PORT: ${WS_PORT:-7001}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    restart: unless-stopped
+
+  ov-api:
+    build: ./services/ov-api
+    depends_on: [ov-bridge]
+    volumes:
+      - ./data:/data
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      SQLITE_PATH: /data/overwatch.db
+      SESSION_SECRET: ${SESSION_SECRET}
+      BRIDGE_WS_URL: ${BRIDGE_WS_URL:-ws://host.docker.internal:7001/events}
+      ROBOT_MJPEG_URL: ${ROBOT_MJPEG_URL:-http://host.docker.internal:8080/video_feed/color_image}
+      DEEP_LINK_SECRET: ${DEEP_LINK_SECRET}
+      DEEP_LINK_TTL_HOURS: ${DEEP_LINK_TTL_HOURS:-24}
+      DASHBOARD_BASE_URL: ${DASHBOARD_BASE_URL:-http://localhost:3001}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  ov-telegram:
+    build: ./services/ov-telegram
+    depends_on: [ov-bridge, ov-api]
+    volumes:
+      - ./data:/data
+    environment:
+      SQLITE_PATH: /data/overwatch.db
+      BRIDGE_WS_URL: ${BRIDGE_WS_URL:-ws://host.docker.internal:7001/events}
+      MCP_URL: ${MCP_URL:-http://host.docker.internal:9990/mcp}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MODEL: ${MODEL:-claude-sonnet-4-6}
+      DASHBOARD_BASE_URL: ${DASHBOARD_BASE_URL:-http://localhost:3001}
+      DEEP_LINK_SECRET: ${DEEP_LINK_SECRET}
+      OV_API_URL: http://ov-api:3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  ov-dashboard:
+    build: ./services/ov-dashboard
+    depends_on: [ov-api]
+    ports:
+      - "${DASHBOARD_PORT:-3001}:3000"
+    environment:
+      OV_API_URL: http://ov-api:3000
+      OV_API_PUBLIC_URL: ${OV_API_PUBLIC_URL:-http://localhost:3000}
+      OV_ROBOT_MJPEG: ${OV_ROBOT_MJPEG:-http://host.docker.internal:8080/video_feed/color_image}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [ov-api, ov-dashboard]
+    profiles: ["prod"]
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
