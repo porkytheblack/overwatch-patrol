@@ -1,0 +1,8 @@
+aiohttp>=3.10
+aiosqlite>=0.20
+pydantic>=2.9
+python-dotenv>=1.0
+structlog>=24.4
+# LCM is optional at runtime — if not installed, the bridge still serves WS/HTTP
+# with no LCM ingestion (useful in CI / dashboards-only mode).
+# Install on the robot host: `pip install lcm`.

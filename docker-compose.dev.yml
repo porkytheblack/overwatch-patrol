@@ -1,0 +1,41 @@
+services:
+  ov-bridge:
+    build:
+      context: ./services/ov-bridge
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/ov-bridge:/app
+      - ./data:/data
+
+  ov-api:
+    build:
+      context: ./services/ov-api
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/ov-api:/app
+      - ./packages:/packages
+      - /app/node_modules
+      - ./data:/data
+    command: pnpm dev
+
+  ov-telegram:
+    build:
+      context: ./services/ov-telegram
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/ov-telegram:/app
+      - ./packages:/packages
+      - /app/node_modules
+      - ./data:/data
+    command: pnpm dev
+
+  ov-dashboard:
+    build:
+      context: ./services/ov-dashboard
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/ov-dashboard:/app
+      - ./packages:/packages
+      - /app/node_modules
+      - /app/.next
+    command: pnpm dev

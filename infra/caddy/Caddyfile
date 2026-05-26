@@ -1,0 +1,9 @@
+{
+  email admin@example.com
+}
+
+{$DASHBOARD_HOSTNAME:overwatch.local} {
+  reverse_proxy /api/* ov-api:3000
+  reverse_proxy /ws ov-api:3000
+  reverse_proxy ov-dashboard:3000
+}

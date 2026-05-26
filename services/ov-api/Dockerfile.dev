@@ -1,0 +1,4 @@
+FROM node:20-bookworm-slim
+RUN corepack enable
+WORKDIR /app
+EXPOSE 3000
