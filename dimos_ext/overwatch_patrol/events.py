@@ -3,9 +3,16 @@
 # Regenerate via: pnpm -F @overwatch/schemas codegen
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# UUID v7 wire-format: canonical 8-4-4-4-12 string. Validated by length only
+# (the producer is dimos / ov-bridge, both of which generate true v7 UUIDs).
+UuidStr = Annotated[str, Field(min_length=36, max_length=36)]
+# ISO-8601 UTC string (e.g. "2025-01-01T12:34:56.789Z" or "...+00:00").
+IsoDatetime = Annotated[str, Field(min_length=20)]
 
 
 class _Base(BaseModel):
@@ -17,6 +24,11 @@ class Bbox(_Base):
     y: float
     w: float
     h: float
+
+
+class Vec2(_Base):
+    x: float
+    y: float
 
 
 class Detection(_Base):
@@ -37,39 +49,39 @@ RobotState = Literal["IDLE", "PATROLLING", "INSPECTING", "COOLDOWN", "MANUAL_OVE
 
 class FrameDetections(_Base):
     type: Literal["frame.detections"] = "frame.detections"
-    ts: str
+    ts: IsoDatetime
     detections: list[Detection]
 
 
 class RobotStateChanged(_Base):
     type: Literal["robot.state_changed"] = "robot.state_changed"
-    ts: str
+    ts: IsoDatetime
     state: RobotState
-    waypoint_id: Optional[str] = None
+    waypoint_id: Optional[UuidStr] = None
     pose: Optional[Pose] = None
 
 
 class IncidentOpened(_Base):
     type: Literal["incident.opened"] = "incident.opened"
-    incident_id: str
-    waypoint_id: str
+    incident_id: UuidStr
+    waypoint_id: UuidStr
     classes: list[str]
-    opened_at: str
+    opened_at: IsoDatetime
     track_id: Optional[str] = None
-    inspection_pose: Optional[dict] = None  # {x, y}
+    inspection_pose: Optional[Vec2] = None
 
 
 class IncidentClosed(_Base):
     type: Literal["incident.closed"] = "incident.closed"
-    incident_id: str
-    closed_at: str
+    incident_id: UuidStr
+    closed_at: IsoDatetime
     status: Literal["closed", "suppressed"]
     duration_ms: float
 
 
 class ClipReady(_Base):
     type: Literal["clip.ready"] = "clip.ready"
-    incident_id: str
+    incident_id: UuidStr
     clip_path: str
     poster_path: str
     duration_ms: float
@@ -77,7 +89,7 @@ class ClipReady(_Base):
 
 class WaypointSync(_Base):
     type: Literal["waypoint.sync"] = "waypoint.sync"
-    waypoint_id: str
+    waypoint_id: UuidStr
     name: str
     pose: Pose
     action: Literal["upsert", "delete"]

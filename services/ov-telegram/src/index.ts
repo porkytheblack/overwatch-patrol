@@ -4,15 +4,14 @@
  * Token is loaded from `bot_configs.telegram` in SQLite (set via the dashboard).
  * Bridge events drive outbound notifications; inbound messages drive the agent.
  */
+import { createServer } from 'node:http';
 import TelegramBot from 'node-telegram-bot-api';
-import { eq } from 'drizzle-orm';
-import { schema, nowIso, signDeepLink } from '@overwatch/shared-ts';
-import { db } from './db.js';
+import { newId, nowIso, signDeepLink } from '@overwatch/shared-ts';
 import { ENV } from './env.js';
 import { log } from './log.js';
 import { ConfigWatcher } from './config-watcher.js';
 import { BridgeWs } from './bridge-ws.js';
-import { onIncidentOpened, onClipReady, setBot } from './notifications.js';
+import { onIncidentOpened, onClipReady, onRobotStateChanged, setBot } from './notifications.js';
 import { handleMessage } from './agent.js';
 
 let bot: TelegramBot | null = null;
@@ -25,6 +24,29 @@ function stop() {
   }
   bot = null;
   setBot(null);
+}
+
+/** Acknowledge an incident through the robot's MCP server (spec §7.7 line 745). */
+async function ackViaMcp(incidentId: string, userHandle: string): Promise<boolean> {
+  try {
+    const res = await fetch(ENV.MCP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: newId(),
+        method: 'tools/call',
+        params: {
+          name: 'acknowledge_incident',
+          arguments: { incident_id: incidentId, user_handle: userHandle },
+        },
+      }),
+    });
+    return res.ok;
+  } catch (e) {
+    log.error('tg.ack_mcp_error', { error: String(e) });
+    return false;
+  }
 }
 
 function start(token: string) {
@@ -50,28 +72,20 @@ function start(token: string) {
     if (!q.data || !q.message) return;
     const [action, incidentId] = q.data.split(':');
     if (action === 'ack' && incidentId) {
-      try {
-        const handle = q.from.username ? `@${q.from.username}` : String(q.from.id);
-        db.update(schema.incidents)
-          .set({
-            status: 'acknowledged',
-            acknowledged_at: nowIso(),
-            acknowledged_by_handle: handle,
-          })
-          .where(eq(schema.incidents.id, incidentId))
-          .run();
+      const handle = q.from.username ? `@${q.from.username}` : String(q.from.id);
+      const ok = await ackViaMcp(incidentId, handle);
+      if (ok) {
         await bot!.answerCallbackQuery(q.id, { text: `ACK'D by ${handle}` });
         await bot!
-          .editMessageCaption(`${q.message.caption ?? ''}\n\nACK'D by ${handle} at ${nowIso()}`, {
-            chat_id: q.message.chat.id,
-            message_id: q.message.message_id,
-          })
+          .editMessageCaption(
+            `${q.message.caption ?? ''}\n\nACK'D by ${handle} at ${nowIso()}`,
+            { chat_id: q.message.chat.id, message_id: q.message.message_id },
+          )
           .catch(() => undefined);
-      } catch (e) {
-        log.error('tg.ack_error', { error: String(e) });
+      } else {
         await bot!.answerCallbackQuery(q.id, { text: 'ack failed' });
       }
-    } else if (action === 'view') {
+    } else if (action === 'view' && incidentId) {
       const token = signDeepLink(incidentId, ENV.DEEP_LINK_SECRET, ENV.DEEP_LINK_TTL_HOURS);
       await bot!.answerCallbackQuery(q.id, {
         url: `${ENV.DASHBOARD_BASE_URL}/incidents/${incidentId}/playback?token=${encodeURIComponent(token)}`,
@@ -94,8 +108,20 @@ const bridge = new BridgeWs(ENV.BRIDGE_WS_URL);
 bridge.on((evt) => {
   if (evt.type === 'incident.opened') onIncidentOpened(evt);
   else if (evt.type === 'clip.ready') onClipReady(evt);
+  else if (evt.type === 'robot.state_changed') onRobotStateChanged(evt);
 });
 bridge.start();
+
+// Health probe (spec §15 DoD: "All services have /health")
+const healthPort = Number(process.env.HEALTH_PORT ?? 7100);
+createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', telegram_active: !!bot }));
+  } else {
+    res.writeHead(404).end();
+  }
+}).listen(healthPort, () => log.info('telegram.health_ready', { port: healthPort }));
 
 process.on('SIGTERM', () => {
   watcher.stop();

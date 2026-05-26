@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -24,6 +25,8 @@ class Storage:
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
+        # per-incident rate-limit bucket for the 1 row/sec detection persist
+        self._last_detection_second: dict[str, int] = {}
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Cursor]:
@@ -104,15 +107,29 @@ class Storage:
             )
 
     def insert_detections(self, ts: str, detections: list[dict[str, Any]]) -> None:
-        # Downsample: only persist if we have an open incident at this moment
-        # (we still broadcast all detections over WS).
+        """Persist detections tied to open incidents, downsampled to 1 row/sec/incident.
+
+        Spec §7.5: "FrameDetections → optionally batch-insert recent detections
+        tied to open incident IDs (downsample to 1 row per second to keep volume sane)."
+        """
+        # Coarsen ts to whole seconds for the rate-limit bucket key.
+        try:
+            from datetime import datetime
+
+            sec_bucket = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+        except Exception:
+            sec_bucket = int(time.time())
         with self._tx() as cur:
             cur.execute("SELECT id FROM incidents WHERE status = 'open'")
             open_ids = [row[0] for row in cur.fetchall()]
             if not open_ids:
                 return
-            for det in detections:
-                for iid in open_ids:
+            for iid in open_ids:
+                # 1 row/sec/incident
+                if self._last_detection_second.get(iid) == sec_bucket:
+                    continue
+                self._last_detection_second[iid] = sec_bucket
+                for det in detections:
                     cur.execute(
                         """
                         INSERT INTO detections (ts, class, confidence, bbox, track_id, incident_id)
@@ -127,6 +144,17 @@ class Storage:
                             iid,
                         ),
                     )
+
+    def load_pending_incidents(self) -> list[str]:
+        """Restart recovery (§7.5 DoD): which incidents are still awaiting clips?"""
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "SELECT id FROM incidents WHERE clip_status = 'pending' AND closed_at IS NOT NULL"
+            )
+            return [row[0] for row in cur.fetchall()]
+        finally:
+            cur.close()
 
     def upsert_waypoint(self, evt: dict[str, Any]) -> None:
         pose = evt["pose"]

@@ -1,5 +1,6 @@
 import { Shell } from '@/components/Shell';
 import { apiFetch } from '@/lib/api';
+import { incidentLabel, incidentPillClass } from '@/lib/labels';
 import { notFound } from 'next/navigation';
 import { AckButton } from './AckButton';
 
@@ -68,16 +69,24 @@ export default async function Page({ params }: { params: { id: string } }) {
               detections · {detections.length} samples, {tracks.size} tracks
             </div>
             <div className="space-y-2">
-              {Array.from(tracks.entries()).map(([trackId, dets]) => (
-                <div key={trackId} className="border-t border-border pt-2">
-                  <div className="mono text-xs text-text-muted">
-                    track {trackId} · {dets.length} samples
+              {Array.from(tracks.entries()).map(([trackId, dets]) => {
+                const first = dets[0];
+                const last = dets[dets.length - 1];
+                const maxConf = Math.max(...dets.map((d) => d.confidence));
+                return (
+                  <div key={trackId} className="border-t border-border pt-2">
+                    <div className="mono text-xs text-text-muted">
+                      track {trackId} · {dets.length} samples
+                    </div>
+                    <div className="mono text-xs text-text-dim">
+                      {first.class} · max {(maxConf * 100).toFixed(0)}%
+                    </div>
+                    <div className="mono text-xs text-text-dim">
+                      {first.ts.slice(11, 19)} → {last.ts.slice(11, 19)}
+                    </div>
                   </div>
-                  <div className="mono text-xs text-text-dim">
-                    {dets[0].class} · {(dets[0].confidence * 100).toFixed(0)}%
-                  </div>
-                </div>
-              ))}
+                );
+              })}
               {detections.length === 0 && <div className="mono text-text-dim text-xs">none</div>}
             </div>
           </div>
@@ -107,7 +116,7 @@ export default async function Page({ params }: { params: { id: string } }) {
           )}
           <div>
             <div className="mono uppercase text-[10px] text-text-dim tracking-[0.04em]">status</div>
-            <div className={pillFor(incident.status)}>{incident.status.toUpperCase()}</div>
+            <div className={incidentPillClass(incident.status)}>{incidentLabel(incident.status)}</div>
           </div>
           {incident.summary && (
             <div>
@@ -126,19 +135,4 @@ export default async function Page({ params }: { params: { id: string } }) {
       </div>
     </Shell>
   );
-}
-
-function pillFor(status: string) {
-  switch (status) {
-    case 'open':
-      return 'pill pill-open';
-    case 'acknowledged':
-      return 'pill pill-ackd';
-    case 'closed':
-      return 'pill pill-resolved';
-    case 'suppressed':
-      return 'pill pill-suppressed';
-    default:
-      return 'pill pill-muted';
-  }
 }

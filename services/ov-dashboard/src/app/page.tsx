@@ -1,6 +1,7 @@
 import { Shell } from '@/components/Shell';
 import { LiveTile } from '@/components/LiveTile';
 import { apiFetch } from '@/lib/api';
+import { incidentLabel, incidentPillClass, timeOf } from '@/lib/labels';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
@@ -10,6 +11,7 @@ interface Incident {
   classes: string[];
   opened_at: string;
   status: string;
+  poster_path: string | null;
 }
 
 interface SetupCheck {
@@ -55,12 +57,25 @@ export default async function Page() {
                 href={`/incidents/${i.id}`}
                 className="row text-sm no-underline"
               >
-                <span className="mono text-text-dim shrink-0">
-                  {new Date(i.opened_at).toISOString().slice(11, 19)}
-                </span>
+                {i.poster_path ? (
+                  <img
+                    src={`/api/incidents/${i.id}/poster`}
+                    alt=""
+                    className="shrink-0 border border-border"
+                    style={{ width: 48, height: 27, objectFit: 'cover' }}
+                  />
+                ) : (
+                  <div
+                    className="shrink-0 border border-border bg-surface-elev"
+                    style={{ width: 48, height: 27 }}
+                  />
+                )}
+                <span className="mono text-text-dim shrink-0">{timeOf(i.opened_at)}</span>
                 <span className="mono text-text-muted shrink-0">{i.waypoint_name ?? '—'}</span>
                 <span className="text-text truncate">{i.classes.join(', ')}</span>
-                <span className={`ml-auto ${pillFor(i.status)}`}>{i.status.toUpperCase()}</span>
+                <span className={`ml-auto ${incidentPillClass(i.status)}`}>
+                  {incidentLabel(i.status)}
+                </span>
               </Link>
             ))}
           </div>
@@ -68,19 +83,4 @@ export default async function Page() {
       </div>
     </Shell>
   );
-}
-
-function pillFor(status: string) {
-  switch (status) {
-    case 'open':
-      return 'pill pill-open';
-    case 'acknowledged':
-      return 'pill pill-ackd';
-    case 'closed':
-      return 'pill pill-resolved';
-    case 'suppressed':
-      return 'pill pill-suppressed';
-    default:
-      return 'pill pill-muted';
-  }
 }

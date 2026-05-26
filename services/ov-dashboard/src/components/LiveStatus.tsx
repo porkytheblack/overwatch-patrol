@@ -78,10 +78,14 @@ export function useLiveStatus() {
 export function statePillClass(state: RobotState): string {
   switch (state) {
     case 'PATROLLING':
-      return 'pill pill-inspecting';
+      return 'pill pill-inspecting'; // amber outline
     case 'INSPECTING':
-      return 'pill pill-open';
+      return 'pill pill-open'; // amber fill
     case 'MANUAL_OVERRIDE':
+      return 'pill pill-muted';
+    case 'IDLE':
+      return 'pill pill-muted';
+    case 'COOLDOWN':
       return 'pill pill-muted';
     case 'OFFLINE':
       return 'pill pill-offline';

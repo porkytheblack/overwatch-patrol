@@ -38,10 +38,18 @@ async def run(cfg: Config) -> None:
             log.exception("storage.error", topic=topic, error=str(e))
         await hub.broadcast(payload)
 
+    # Restart recovery (spec §7.5 DoD): surface incidents still waiting for clips.
+    try:
+        pending = storage.load_pending_incidents()
+        if pending:
+            log.info("bridge.recovered_pending", count=len(pending), ids=pending[:10])
+    except Exception as e:  # noqa: BLE001
+        log.warning("bridge.recovery_failed", error=str(e))
+
     listener = LcmListener(cfg.lcm_url, dispatch)
     await listener.start()
 
-    app = make_app(hub)
+    app = make_app(hub, storage)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", cfg.ws_port)

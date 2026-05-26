@@ -1,5 +1,22 @@
 import type { Metadata } from 'next';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
+
+// `next/font/google` downloads the woff2 at build time and self-hosts them
+// (no runtime requests to fonts.googleapis.com) — satisfies spec §0 Type.
+const inter = Inter({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  variable: '--font-inter',
+  display: 'swap',
+});
+
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  variable: '--font-mono',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: 'OVERWATCH PATROL',
@@ -8,13 +25,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <head>
-        <link
-          rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap"
-        />
-      </head>
+    <html lang="en" className={`dark ${inter.variable} ${mono.variable}`}>
       <body>{children}</body>
     </html>
   );

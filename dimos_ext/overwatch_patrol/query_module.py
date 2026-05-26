@@ -10,14 +10,54 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Iterator, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Literal, Optional
+
+
+try:  # pragma: no cover
+    from dimos.agents.skills.skill_decorator import skill  # type: ignore
+except Exception:  # pragma: no cover
+    def skill(fn=None, **_kwargs):  # type: ignore[no-redef]
+        if fn is None:
+            return lambda f: f
+        return fn
 
 
 @dataclass
 class SurveillanceQueryModule:
     sqlite_path: str
+    # Detector FPS is reported by the surveillance module; we read the most
+    # recent value (the blueprint can push it onto this field via a callback).
+    _detector_fps_ema: float = field(default=0.0)
+    _detector_last_sample: float = field(default=0.0)
+
+    @classmethod
+    def blueprint(cls, **kwargs: Any) -> Any:
+        try:  # pragma: no cover
+            from dimos.core.coordination.blueprints import module_blueprint  # type: ignore
+
+            return module_blueprint(cls, **kwargs)
+        except Exception:
+            return cls(**kwargs)
+
+    def record_detector_tick(self, ts: float) -> None:
+        """Blueprint calls this on every detector frame to maintain a smoothed
+        FPS estimate available to `get_compound_status`.
+        """
+        if self._detector_last_sample <= 0:
+            self._detector_last_sample = ts
+            return
+        dt = ts - self._detector_last_sample
+        self._detector_last_sample = ts
+        if dt <= 0:
+            return
+        inst = 1.0 / dt
+        # Exponential moving average, alpha=0.2
+        self._detector_fps_ema = (
+            inst if self._detector_fps_ema == 0 else 0.2 * inst + 0.8 * self._detector_fps_ema
+        )
 
     @contextmanager
     def _ro(self) -> Iterator[sqlite3.Connection]:
@@ -32,6 +72,7 @@ class SurveillanceQueryModule:
 
     # ---- @skill: search_incidents ----------------------------------------
 
+    @skill
     def search_incidents(
         self,
         time_range_start: str,
@@ -71,6 +112,7 @@ class SurveillanceQueryModule:
 
     # ---- @skill: get_incident_details ------------------------------------
 
+    @skill
     def get_incident_details(self, incident_id: str) -> str:
         with self._ro() as conn:
             row = conn.execute(
@@ -96,9 +138,17 @@ class SurveillanceQueryModule:
 
     # ---- @skill: get_compound_status -------------------------------------
 
+    @skill
     def get_compound_status(self) -> str:
         with self._ro() as conn:
-            robot = conn.execute("SELECT * FROM robot_status WHERE id = 1").fetchone()
+            robot = conn.execute(
+                """
+                SELECT r.*, w.name AS current_waypoint_name
+                FROM robot_status r
+                LEFT JOIN waypoints w ON w.id = r.current_waypoint_id
+                WHERE r.id = 1
+                """
+            ).fetchone()
             open_count = conn.execute(
                 "SELECT COUNT(*) AS n FROM incidents WHERE status = 'open'"
             ).fetchone()
@@ -110,16 +160,31 @@ class SurveillanceQueryModule:
               GROUP BY hour ORDER BY hour
                 """
             ).fetchall()
+        robot_dict = dict(robot) if robot else None
         return json.dumps(
             {
-                "robot": dict(robot) if robot else None,
+                "robot_state": robot_dict["state"] if robot_dict else "OFFLINE",
+                "current_waypoint": robot_dict["current_waypoint_name"] if robot_dict else None,
+                "current_waypoint_id": robot_dict["current_waypoint_id"] if robot_dict else None,
+                "last_seen_at": robot_dict["last_seen_at"] if robot_dict else None,
+                "pose": (
+                    {
+                        "x": robot_dict["pose_x"],
+                        "y": robot_dict["pose_y"],
+                        "yaw": robot_dict["pose_yaw"],
+                    }
+                    if robot_dict
+                    else None
+                ),
                 "open_incident_count": open_count["n"],
+                "detector_fps": round(self._detector_fps_ema, 2),
                 "recent_activity": [dict(r) for r in recent],
             }
         )
 
     # ---- @skill: get_waypoint_context ------------------------------------
 
+    @skill
     def get_waypoint_context(self, waypoint_id: str) -> str:
         with self._ro() as conn:
             wp = conn.execute(
@@ -144,53 +209,64 @@ class SurveillanceQueryModule:
 
     # ---- @skill: summarize_period ----------------------------------------
 
+    @skill
     def summarize_period(
         self,
         start: str,
         end: str,
         waypoint_id: Optional[str] = None,
     ) -> str:
-        clauses = ["opened_at BETWEEN ? AND ?"]
+        clauses = ["i.opened_at BETWEEN ? AND ?"]
         args: list = [start, end]
         if waypoint_id:
-            clauses.append("waypoint_id = ?")
+            clauses.append("i.waypoint_id = ?")
             args.append(waypoint_id)
         with self._ro() as conn:
             total = conn.execute(
-                f"SELECT COUNT(*) AS n FROM incidents WHERE {' AND '.join(clauses)}",
+                f"SELECT COUNT(*) AS n FROM incidents i WHERE {' AND '.join(clauses)}",
                 args,
             ).fetchone()["n"]
+            # Use json_each to explode the classes array so each element gets
+            # its own bucket — avoids `["person"]` vs `["person","vehicle"]`
+            # producing separate rows.
             by_class = conn.execute(
                 f"""
-                SELECT classes, COUNT(*) AS n FROM incidents WHERE {' AND '.join(clauses)}
-                GROUP BY classes ORDER BY n DESC LIMIT 10
+                SELECT je.value AS class, COUNT(*) AS n
+                  FROM incidents i, json_each(i.classes) je
+                 WHERE {' AND '.join(clauses)}
+              GROUP BY je.value
+              ORDER BY n DESC LIMIT 10
                 """,
                 args,
             ).fetchall()
             by_wp = conn.execute(
                 f"""
-                SELECT waypoint_id, COUNT(*) AS n FROM incidents WHERE {' AND '.join(clauses)}
-                GROUP BY waypoint_id ORDER BY n DESC
+                SELECT i.waypoint_id, w.name AS waypoint_name, COUNT(*) AS n
+                  FROM incidents i LEFT JOIN waypoints w ON w.id = i.waypoint_id
+                 WHERE {' AND '.join(clauses)}
+              GROUP BY i.waypoint_id
+              ORDER BY n DESC
                 """,
                 args,
             ).fetchall()
         return json.dumps(
             {
                 "total": total,
-                "by_class": [
-                    {"classes": json.loads(r["classes"]), "n": r["n"]} for r in by_class
-                ],
+                "by_class": [{"class": r["class"], "n": r["n"]} for r in by_class],
                 "by_waypoint": [dict(r) for r in by_wp],
             }
         )
 
     # ---- @skill: acknowledge_incident ------------------------------------
 
+    @skill
     def acknowledge_incident(self, incident_id: str, user_handle: str) -> str:
-        # NOTE: this *writes*, so it doesn't open the connection read-only.
+        # This skill *writes*, so it needs a normal (rw) connection.
         conn = sqlite3.connect(self.sqlite_path)
         try:
-            now = sqlite3.Connection.execute(conn, "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0]
+            now = conn.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            ).fetchone()[0]
             cur = conn.execute(
                 """
                 UPDATE incidents

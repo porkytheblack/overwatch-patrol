@@ -35,11 +35,37 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
     if (res.ok) setWaypoints((ws) => ws.filter((w) => w.id !== id));
   }
 
+  async function reorder(ids: string[]) {
+    const res = await fetch('/api/waypoints/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+      credentials: 'include',
+    });
+    if (res.ok) {
+      setWaypoints((ws) => {
+        const map = new Map(ws.map((w) => [w.id, w]));
+        return ids.map((id, idx) => ({ ...map.get(id)!, order_index: idx }));
+      });
+    }
+  }
+
+  function move(id: string, delta: -1 | 1) {
+    const idx = waypoints.findIndex((w) => w.id === id);
+    if (idx < 0) return;
+    const next = idx + delta;
+    if (next < 0 || next >= waypoints.length) return;
+    const ids = waypoints.map((w) => w.id);
+    [ids[idx], ids[next]] = [ids[next], ids[idx]];
+    reorder(ids);
+  }
+
   return (
     <div className="space-y-2">
       <div className="mono text-xs text-text-muted">
         {waypoints.length} waypoint{waypoints.length === 1 ? '' : 's'} · drive the robot to a
-        position and "add waypoint" from Telegram (`/add front_gate`) or from a paired controller
+        position and add via Telegram (<code className="mono">/add front_gate</code>) or a paired
+        controller
       </div>
       {waypoints.length === 0 && (
         <div className="card text-text-dim mono text-sm">no waypoints · drive the robot to a position and add one</div>
@@ -117,6 +143,22 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
               </select>
             </Field>
             <div className="col-span-2 flex justify-end gap-2 pt-2">
+              <button
+                className="btn"
+                onClick={() => move(w.id, -1)}
+                disabled={w.order_index === 0}
+                title="move up"
+              >
+                ↑
+              </button>
+              <button
+                className="btn"
+                onClick={() => move(w.id, 1)}
+                disabled={w.order_index === waypoints.length - 1}
+                title="move down"
+              >
+                ↓
+              </button>
               <button className="btn btn-danger" onClick={() => remove(w.id)}>
                 DELETE
               </button>

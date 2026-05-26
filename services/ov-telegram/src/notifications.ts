@@ -1,13 +1,16 @@
 /**
- * Outbound flow: bridge `incident.opened` → wait up to 120s for `clip.ready`
- * → render the Telegram message and dispatch to every enabled subscriber.
- *
- * Implemented as Station signals so retries and visibility come for free.
+ * Outbound flow:
+ *   1. bridge `incident.opened` → wait up to 120s for `clip.ready` →
+ *      render the Telegram message per §12 and dispatch to every enabled
+ *      subscriber with inline View / Acknowledge buttons.
+ *   2. bridge `robot.state_changed` → format state-transition messages
+ *      per §12 (e.g. "PATROLLING → MANUAL_OVERRIDE · heading to front_gate",
+ *      "arrived · front_gate") and dispatch to every enabled subscriber.
  */
 import TelegramBot from 'node-telegram-bot-api';
 import { eq } from 'drizzle-orm';
 import { schema, relativeTime, signDeepLink } from '@overwatch/shared-ts';
-import { IncidentOpened, ClipReady } from '@overwatch/schemas';
+import { IncidentOpened, ClipReady, RobotStateChanged } from '@overwatch/schemas';
 import { db } from './db.js';
 import { ENV } from './env.js';
 import { log } from './log.js';
@@ -25,6 +28,7 @@ interface PendingNotice {
 const pending = new Map<string, PendingNotice>();
 
 let bot: TelegramBot | null = null;
+let lastRobotState: string | null = null;
 
 export function setBot(b: TelegramBot | null) {
   bot = b;
@@ -57,6 +61,52 @@ export function onClipReady(evt: ClipReady) {
   );
 }
 
+/** §12: emit human-readable state messages for relevant transitions. */
+export function onRobotStateChanged(evt: RobotStateChanged) {
+  const prev = lastRobotState;
+  lastRobotState = evt.state;
+  if (!bot || prev === evt.state) return;
+
+  let body: string | null = null;
+  const wpName = waypointNameFor(evt.waypoint_id);
+
+  if (evt.state === 'MANUAL_OVERRIDE' && prev) {
+    body = `${prev} → MANUAL_OVERRIDE${wpName ? ` · heading to ${wpName}` : ''}`;
+  } else if (prev === 'MANUAL_OVERRIDE' && evt.state === 'PATROLLING') {
+    body = wpName ? `arrived · ${wpName}` : 'resumed patrol';
+  } else if (evt.state === 'IDLE' && prev !== 'IDLE') {
+    body = 'stopped';
+  } else if (prev === 'IDLE' && evt.state === 'PATROLLING') {
+    body = 'patrol started';
+  } else {
+    return; // not a notable transition
+  }
+
+  fanOut(body).catch((e) => log.error('notify.state.error', { error: String(e) }));
+}
+
+function waypointNameFor(id?: string): string | null {
+  if (!id) return null;
+  const row = db.select().from(schema.waypoints).where(eq(schema.waypoints.id, id)).get();
+  return row?.name ?? null;
+}
+
+async function fanOut(message: string): Promise<void> {
+  if (!bot) return;
+  const subs = db
+    .select()
+    .from(schema.subscribers)
+    .where(eq(schema.subscribers.enabled, 1))
+    .all();
+  for (const sub of subs.filter((s) => s.channel === 'telegram')) {
+    try {
+      await bot.sendMessage(sub.handle, message);
+    } catch (e) {
+      log.error('notify.state.send_error', { handle: sub.handle, error: String(e) });
+    }
+  }
+}
+
 async function dispatch(incident_id: string) {
   const notice = pending.get(incident_id);
   if (!notice) return;
@@ -77,7 +127,11 @@ async function dispatch(incident_id: string) {
     return;
   }
 
-  const subs = db.select().from(schema.subscribers).where(eq(schema.subscribers.enabled, 1)).all();
+  const subs = db
+    .select()
+    .from(schema.subscribers)
+    .where(eq(schema.subscribers.enabled, 1))
+    .all();
   if (subs.length === 0) {
     log.info('notify.no_subscribers');
     return;

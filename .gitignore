@@ -49,6 +49,5 @@ logs/
 station-keys.json
 station-logs.jsonl
 
-# generated
-packages/schemas/pygen/*.py
-!packages/schemas/pygen/.gitkeep
+# generated (events.py is regenerated from packages/schemas)
+dimos_ext/overwatch_patrol/events.py.bak

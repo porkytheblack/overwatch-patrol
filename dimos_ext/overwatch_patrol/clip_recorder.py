@@ -17,7 +17,7 @@ import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -39,19 +39,50 @@ class _Frame:
 @dataclass
 class ClipRecorderModule:
     config: ClipRecorderConfig = field(default_factory=ClipRecorderConfig)
-    _frames: deque = field(default_factory=lambda: deque(maxlen=300))
-    _detections: deque = field(default_factory=lambda: deque(maxlen=300))
+    _frames: deque = field(init=False)
+    _detections: deque = field(init=False)
     _active: dict[str, "ActiveClip"] = field(default_factory=dict)
 
     publish_lcm: callable = lambda _topic, _payload: None  # type: ignore
 
+    def __post_init__(self) -> None:
+        # Sized to hold `pre_roll_s` seconds at the configured fps, plus a
+        # small headroom for clock jitter.
+        cap = max(int(self.config.pre_roll_s * self.config.fps * 1.2), 30)
+        self._frames = deque(maxlen=cap)
+        self._detections = deque(maxlen=cap)
+
+    @classmethod
+    def blueprint(cls, **kwargs: Any) -> Any:
+        try:  # pragma: no cover
+            from dimos.core.coordination.blueprints import module_blueprint  # type: ignore
+
+            return module_blueprint(cls, **kwargs)
+        except Exception:
+            config = ClipRecorderConfig(**kwargs) if kwargs else ClipRecorderConfig()
+            return cls(config=config)
+
     def on_frame(self, ts: float, image_bgr: bytes) -> None:
         self._frames.append(_Frame(ts, image_bgr))
+        # Find the nearest detection batch by timestamp for the overlay.
+        nearest = self._nearest_detections(ts)
         for clip in self._active.values():
-            clip.push_frame(ts, image_bgr)
+            clip.push_frame(ts, image_bgr, nearest)
 
     def on_detections(self, ts: float, detections: list[dict]) -> None:
         self._detections.append((ts, detections))
+
+    def _nearest_detections(self, ts: float) -> list[dict]:
+        if not self._detections:
+            return []
+        best_dt = float("inf")
+        best: list[dict] = []
+        for dts, dets in self._detections:
+            dt = abs(dts - ts)
+            if dt < best_dt:
+                best_dt = dt
+                best = dets
+        return best
 
     def on_incident_opened(self, incident_id: str) -> None:
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
@@ -61,9 +92,9 @@ class ClipRecorderModule:
             path=out_mp4,
             config=self.config,
         )
-        # Push pre-roll
+        # Push pre-roll, with overlay derived from the nearest detection batch.
         for f in self._frames:
-            clip.push_frame(f.ts, f.image)
+            clip.push_frame(f.ts, f.image, self._nearest_detections(f.ts))
         self._active[incident_id] = clip
 
     def on_incident_closed(self, incident_id: str) -> None:
@@ -98,7 +129,8 @@ class ActiveClip:
     path: str
     config: ClipRecorderConfig
     poster_path: str = ""
-    duration_ms: float = 0
+    duration_ms: float = 0.0
+    frame_count: int = 0
     _proc: Optional[subprocess.Popen] = None
     _started_at: Optional[float] = None
     _close_at: Optional[float] = None
@@ -135,16 +167,20 @@ class ActiveClip:
             stdin=subprocess.PIPE,
         )
 
-    def push_frame(self, ts: float, image_bgr: bytes) -> None:
+    def push_frame(self, ts: float, image_bgr: bytes, detections: list[dict]) -> None:
         if self._proc is None:
             self._start_ffmpeg()
             self._started_at = ts
+        composited = _composite_bboxes(
+            image_bgr, detections, self.config.width, self.config.height
+        )
         if self._proc and self._proc.stdin:
             try:
-                self._proc.stdin.write(image_bgr)
+                self._proc.stdin.write(composited)
             except BrokenPipeError:
                 pass
         self._last_ts = ts
+        self.frame_count += 1
 
     def schedule_close(self, post_roll_s: float) -> None:
         self._close_at = self._last_ts + post_roll_s
@@ -159,25 +195,77 @@ class ActiveClip:
             except Exception:
                 pass
             self._proc.wait()
-        # Poster: dump the middle frame via ffmpeg
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    self.path,
-                    "-vf",
-                    "select=eq(n\\,30)",
-                    "-vframes",
-                    "1",
-                    self.poster_path,
-                ],
-                check=False,
-            )
-        except Exception:
-            pass
+        # Poster: middle frame of the actual clip duration.
+        if self.frame_count > 0:
+            middle = max(0, self.frame_count // 2)
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        self.path,
+                        "-vf",
+                        f"select=eq(n\\,{middle})",
+                        "-vframes",
+                        "1",
+                        self.poster_path,
+                    ],
+                    check=False,
+                )
+            except Exception:
+                pass
         if self._started_at:
             self.duration_ms = (self._last_ts - self._started_at) * 1000
+
+
+def _composite_bboxes(
+    image_bgr: bytes,
+    detections: list[dict],
+    width: int,
+    height: int,
+) -> bytes:
+    """Overlay `cv2.rectangle` + class·conf label per detection.
+
+    Returns the composited bgr24 bytes. If OpenCV/NumPy aren't available
+    (CI / unit tests), or there are no detections to draw, returns the
+    input unchanged.
+    """
+    if not detections:
+        return image_bgr
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:  # pragma: no cover - CI fallback
+        return image_bgr
+
+    try:
+        arr = np.frombuffer(image_bgr, dtype=np.uint8).reshape((height, width, 3)).copy()
+    except Exception:
+        return image_bgr
+
+    amber = (11, 158, 245)  # BGR for the brand accent #F59E0B
+    for det in detections:
+        bbox = det.get("bbox") or {}
+        try:
+            x = int(bbox["x"])
+            y = int(bbox["y"])
+            w = int(bbox["w"])
+            h = int(bbox["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cv2.rectangle(arr, (x, y), (x + w, y + h), amber, 1)
+        label = f"{det.get('class', '?')}·{int((det.get('confidence', 0)) * 100)}%"
+        cv2.putText(
+            arr,
+            label,
+            (x, max(0, y - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            amber,
+            1,
+            cv2.LINE_AA,
+        )
+    return arr.tobytes()

@@ -19,8 +19,20 @@
     --danger: #ef4444;
   }
   html, body { background: var(--bg); color: var(--text); }
-  body { font-family: 'Inter', system-ui, sans-serif; }
-  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  body { font-family: var(--font-inter), 'Inter', system-ui, sans-serif; }
+  .mono { font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace; }
+  input[type='checkbox'] {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    border-radius: 0;
+    display: inline-block;
+    vertical-align: middle;
+    cursor: pointer;
+  }
+  input[type='checkbox']:checked { background: var(--accent); border-color: var(--accent); }
 }
 
 @layer components {
@@ -59,7 +71,7 @@
   }
   .pulse-dot {
     width: 6px; height: 6px; background: var(--accent);
-    animation: ow-pulse 2s ease-in-out infinite;
+    animation: ow-pulse 2s ease-out infinite;
   }
   @keyframes ow-pulse {
     0%, 100% { opacity: 1; }

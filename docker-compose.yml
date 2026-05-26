@@ -63,6 +63,10 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  # Caddy is opt-in via the `prod` profile so `make dev` (which expects
+  # the dashboard on :3001 / api on :3000 directly) doesn't fight it for
+  # ports 80/443. To enable TLS termination in production:
+  #   docker compose --profile prod up -d
   caddy:
     image: caddy:2-alpine
     ports:

@@ -51,10 +51,10 @@ e2e:
 	bash ./scripts/e2e.sh
 
 link-dimos:
-	@test -n "$(PATH_)" || (echo "usage: make link-dimos PATH_=../dimos" && exit 1)
+	@test -n "$(DIMOS_PATH)" || (echo "usage: make link-dimos DIMOS_PATH=../dimos" && exit 1)
 	rm -rf vendor/dimos
-	ln -s $(PATH_) vendor/dimos
-	@echo "✓ vendor/dimos → $(PATH_)"
+	ln -s $(DIMOS_PATH) vendor/dimos
+	@echo "✓ vendor/dimos → $(DIMOS_PATH)"
 
 unlink-dimos:
 	@test -L vendor/dimos && rm vendor/dimos && git submodule update --init vendor/dimos || true

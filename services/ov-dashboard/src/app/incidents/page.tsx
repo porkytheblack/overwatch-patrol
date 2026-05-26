@@ -1,5 +1,6 @@
 import { Shell } from '@/components/Shell';
 import { apiFetch } from '@/lib/api';
+import { incidentLabel, incidentPillClass, timeOf } from '@/lib/labels';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
@@ -39,9 +40,7 @@ export default async function Page() {
           <h1 className="mono uppercase text-sm tracking-[0.04em]">INCIDENTS</h1>
           <span className="mono text-xs text-text-dim">{incidents.length} total</span>
         </div>
-        {days.length === 0 && (
-          <div className="mono text-text-dim text-sm">no incidents</div>
-        )}
+        {days.length === 0 && <div className="mono text-text-dim text-sm">no incidents</div>}
         {days.map((day) => (
           <section key={day} className="mb-6">
             <h2 className="mono uppercase text-xs text-text-muted tracking-[0.04em] mb-2">
@@ -50,14 +49,27 @@ export default async function Page() {
             <div className="border-t border-border">
               {byDay.get(day)!.map((i) => (
                 <Link key={i.id} href={`/incidents/${i.id}`} className="row no-underline">
-                  <span className="mono text-text-dim w-20 shrink-0">
-                    {i.opened_at.slice(11, 19)}
-                  </span>
+                  {i.poster_path ? (
+                    <img
+                      src={`/api/incidents/${i.id}/poster`}
+                      alt=""
+                      className="shrink-0 border border-border"
+                      style={{ width: 56, height: 32, objectFit: 'cover' }}
+                    />
+                  ) : (
+                    <div
+                      className="shrink-0 border border-border bg-surface-elev"
+                      style={{ width: 56, height: 32 }}
+                    />
+                  )}
+                  <span className="mono text-text-dim w-20 shrink-0">{timeOf(i.opened_at)}</span>
                   <span className="mono text-text-muted w-40 shrink-0 truncate">
                     {i.waypoint_name ?? '—'}
                   </span>
                   <span className="text-sm truncate flex-1">{i.classes.join(', ')}</span>
-                  <span className={`ml-auto ${pillFor(i.status)}`}>{i.status.toUpperCase()}</span>
+                  <span className={`ml-auto ${incidentPillClass(i.status)}`}>
+                    {incidentLabel(i.status)}
+                  </span>
                 </Link>
               ))}
             </div>
@@ -66,19 +78,4 @@ export default async function Page() {
       </div>
     </Shell>
   );
-}
-
-function pillFor(status: string) {
-  switch (status) {
-    case 'open':
-      return 'pill pill-open';
-    case 'acknowledged':
-      return 'pill pill-ackd';
-    case 'closed':
-      return 'pill pill-resolved';
-    case 'suppressed':
-      return 'pill pill-suppressed';
-    default:
-      return 'pill pill-muted';
-  }
 }
