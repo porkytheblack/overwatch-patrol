@@ -7,18 +7,22 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
-# Submodule (skip silently if not configured)
-if [ -f .gitmodules ]; then
-  git submodule update --init --recursive || true
+if ! command -v uv >/dev/null 2>&1; then
+  echo "▸ uv not found — install via: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  exit 1
 fi
 
-if [ -d vendor/dimos ]; then
-  echo "▸ installing dimos (editable)"
-  uv pip install -e ./vendor/dimos[misc] || pip install -e ./vendor/dimos
-fi
+# Python venv + dimos from PyPI (per dimos's recommended install path).
+echo "▸ creating venv (Python 3.12) if missing"
+[ -d .venv ] || uv venv --python "3.12"
+# shellcheck disable=SC1091
+source .venv/bin/activate
 
-echo "▸ installing dimos_ext"
-uv pip install -e ./dimos_ext || pip install -e ./dimos_ext || true
+echo "▸ installing dimos[base,unitree]"
+uv pip install 'dimos[base,unitree]'
+
+echo "▸ installing dimos_ext (editable)"
+uv pip install -e ./dimos_ext
 
 echo "▸ installing TS workspaces"
 pnpm install

@@ -29,23 +29,33 @@ See [`spec.md`](./spec.md) for the full v1 specification.
 
 ## Prereqs
 
-- Python 3.11+, [uv](https://github.com/astral-sh/uv)
+- Python 3.12+, [uv](https://github.com/astral-sh/uv) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Node 20+, pnpm 9+
 - Docker + Docker Compose v2
-- A Unitree Go2 (or dimos Mujoco sim)
+- A Unitree Go2 (or dimos Mujoco sim — use `make setup-sim` and `make sim`)
 - LCM on a reachable multicast group
 - A Telegram bot token (BotFather)
 - An Anthropic API key
 
+> **Note on dimos.** This repo installs `dimos` directly from PyPI (`dimos[base,unitree]`) per the upstream [recommended install path](https://github.com/dimensionalOS/dimos#installation). No git submodule, no vendoring. This is a deliberate deviation from `spec.md §3` which described an older submodule-based workflow.
+
 ## Quickstart
 
 ```bash
-git clone --recurse-submodules <repo>
+git clone <repo>
 cd overwatch-patrol
 cp .env.example .env             # fill in secrets
-make setup                       # install dimos + dimos_ext + pnpm + migrate
-make dev                         # app stack
-make robot                       # robot stack (on the robot host)
+
+make setup                       # uv venv + dimos[base,unitree] + dimos_ext + pnpm + migrate
+make dev                         # app stack (docker compose)
+make robot                       # robot stack on the robot host
+```
+
+For the Mujoco sim path (no hardware):
+
+```bash
+make setup-sim                   # adds dimos[sim]
+make sim
 ```
 
 Dashboard: <http://localhost:3001>
@@ -56,8 +66,7 @@ First-boot wizard creates the initial operator.
 
 ```
 overwatch-patrol/
-├── vendor/dimos/                 # git submodule
-├── dimos_ext/                    # python extension package
+├── dimos_ext/                    # python extension package (depends on dimos via PyPI)
 ├── packages/
 │   ├── schemas/                  # single source of truth (zod → pydantic)
 │   └── shared-ts/                # shared TS utilities
@@ -72,20 +81,20 @@ overwatch-patrol/
 
 ## Make targets
 
-| Target              | Description                                         |
-|---------------------|-----------------------------------------------------|
-| `make setup`        | install dimos + extension + pnpm + migrate          |
-| `make robot`        | run dimos blueprint on robot host                   |
-| `make sim`          | same blueprint, Mujoco sim                          |
-| `make dev`          | docker compose up -d                                |
-| `make logs SVC=...` | tail one service                                    |
-| `make seed`         | seed admin user, subscribers, retention             |
-| `make reset`        | nuke `./data`                                       |
-| `make codegen`      | regenerate Pydantic events from zod                 |
-| `make migrate`      | apply SQLite migrations                             |
-| `make e2e`          | synthetic-detector smoke test                       |
-| `make link-dimos`   | symlink vendor/dimos → sibling checkout             |
-| `make unlink-dimos` | restore submodule                                   |
+| Target              | Description                                                    |
+|---------------------|----------------------------------------------------------------|
+| `make setup`        | venv + `dimos[base,unitree]` + extension + pnpm + migrate      |
+| `make setup-sim`    | as above, plus `dimos[sim]` for Mujoco                         |
+| `make robot`        | run extension blueprint on the robot host                      |
+| `make sim`          | same blueprint via Mujoco                                      |
+| `make dev`          | docker compose up -d                                           |
+| `make logs SVC=...` | tail one service                                               |
+| `make seed`         | seed admin user, subscribers, retention                        |
+| `make reset`        | nuke `./data`                                                  |
+| `make codegen`      | regenerate Pydantic events from zod                            |
+| `make migrate`      | apply SQLite migrations                                        |
+| `make e2e`          | synthetic-detector smoke test                                  |
+| `make dev-dimos DIMOS_PATH=../dimos` | editable install from a sibling dimos checkout    |
 
 ## Brand
 
@@ -93,8 +102,9 @@ Inherited from Overwatch v1. Single accent (`#F59E0B` amber), JetBrains Mono num
 
 ## Troubleshooting
 
+- **`dimos` import errors** — make sure your venv is active (`source .venv/bin/activate`) and `uv pip install 'dimos[base,unitree]'` succeeded. The bridge can run without dimos (it gracefully degrades with no LCM ingestion); the robot blueprint requires it.
 - **LCM events not flowing into the bridge** — check that `LCM_URL`'s multicast group is reachable from the bridge container. On Linux you may need `network_mode: host` (already set in compose).
-- **Telegram bot idle** — set a token in *Settings → Telegram*; the bot polls SQLite for it and hot-reloads.
+- **Telegram bot idle** — set a token in *Settings → Telegram*; the bot polls SQLite for it and hot-reloads within 30s.
 - **Dashboard shows OFFLINE** — bridge is not seeing `/ow/robot_state` events. Check `make logs SVC=ov-bridge`.
 - **MCP tool calls failing** — the bot's `MCP_URL` must reach the robot's `:9990/mcp` endpoint. From inside Docker that's usually `http://host.docker.internal:9990/mcp`.
 

@@ -6,7 +6,8 @@ events. Exposes `@skill`s via dimos `McpServer`.
 
 This file imports dimos lazily — pure logic (state machine, linger
 tracker) can be unit-tested without dimos installed. The dimos-coupled
-paths (`@skill`, `CameraInfo`, `.blueprint()`) require `vendor/dimos`.
+paths (`@skill`, `CameraInfo`, `.blueprint()`) resolve once
+`dimos[base,unitree]` is installed (see `make setup`).
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from .state_machine import State, StateContext
 # dimos coupling (lazy)
 #
 # `@skill` is a dimos decorator that registers a method on the MCP server.
-# `CameraInfo` is a dimos type. When `vendor/dimos` isn't on the path
+# `CameraInfo` is a dimos type. When `dimos` isn't installed
 # (CI / unit tests), we fall back to a transparent identity decorator
 # and a stub type so this module still imports cleanly.
 # ---------------------------------------------------------------------------

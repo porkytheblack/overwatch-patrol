@@ -1,4 +1,0 @@
-[submodule "vendor/dimos"]
-	path = vendor/dimos
-	url = https://github.com/dimensionalOS/dimos.git
-	shallow = true
