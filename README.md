@@ -31,11 +31,12 @@ See [`spec.md`](./spec.md) for the full v1 specification.
 
 - Python 3.12+, [uv](https://github.com/astral-sh/uv) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Node 20+, pnpm 9+
-- Docker + Docker Compose v2
+- Docker + Docker Compose v2 (or OrbStack)
+- **git-lfs** — `brew install git-lfs && git lfs install` (macOS) / `sudo apt-get install -y git-lfs && git lfs install` (Ubuntu). dimos fetches CLIP + YOLO weights through git-lfs on first launch.
 - A Unitree Go2 (or dimos Mujoco sim — use `make setup-sim` and `make sim`)
 - LCM on a reachable multicast group
 - A Telegram bot token (BotFather)
-- An Anthropic API key
+- An OpenRouter API key (recommended — covers Anthropic, OpenAI, Google, Meta, etc.) or any single-provider key
 
 > **Note on dimos.** This repo installs `dimos` directly from PyPI (`dimos[base,unitree]`) per the upstream [recommended install path](https://github.com/dimensionalOS/dimos#installation). No git submodule, no vendoring. This is a deliberate deviation from `spec.md §3` which described an older submodule-based workflow.
 
@@ -103,6 +104,8 @@ Inherited from Overwatch v1. Single accent (`#F59E0B` amber), JetBrains Mono num
 ## Troubleshooting
 
 - **`dimos` import errors** — make sure your venv is active (`source .venv/bin/activate`) and `uv pip install 'dimos[base,unitree]'` succeeded. The bridge can run without dimos (it gracefully degrades with no LCM ingestion); the robot blueprint requires it.
+- **`IP address must be provided`** (sim path) — set `OV_SIM=1` (or use `make sim` which does it) so the blueprint sets `global_config.simulation = True` and dimos swaps in MujocoConnection.
+- **`Missing required tools: git-lfs`** — install git-lfs (see prereqs). dimos's SpatialMemory and SecurityModule download model weights through git-lfs on first launch.
 - **LCM events not flowing into the bridge** — check that `LCM_URL`'s multicast group is reachable from the bridge container. On Linux you may need `network_mode: host` (already set in compose).
 - **Telegram bot idle** — set a token in *Settings → Telegram*; the bot polls SQLite for it and hot-reloads within 30s.
 - **Dashboard shows OFFLINE** — bridge is not seeing `/ow/robot_state` events. Check `make logs SVC=ov-bridge`.

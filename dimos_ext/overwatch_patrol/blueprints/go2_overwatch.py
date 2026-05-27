@@ -4,16 +4,16 @@ Composes dimos's `unitree_go2_spatial` blueprint with our extension modules,
 plus the dimos `McpServer` so every `@skill` (control + read-only queries)
 is reachable at `http://robot:9990/mcp`.
 
-Run with `make robot` (or `make sim` for the Mujoco connection).
+Run with `make robot` (real Go2, requires `ROBOT_IP`) or `make sim` (Mujoco).
 
-This file imports dimos eagerly because it's the robot entry point — there's
-no scenario where you run this without dimos. For non-dimos environments
-(CI, unit tests), import the individual modules (`surveillance_module`,
-`query_module`, etc.) instead.
+Prereqs: dimos installed (`make setup` / `make setup-sim`) and git-lfs on
+PATH (dimos's SpatialMemory + SecurityModule fetch CLIP / YOLO weights via
+git-lfs on first launch). On macOS: `brew install git-lfs`.
 """
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 
@@ -23,6 +23,7 @@ def main() -> None:
         from dimos.agents.mcp.mcp_server import McpServer
         from dimos.core.coordination.blueprints import autoconnect
         from dimos.core.coordination.module_coordinator import ModuleCoordinator
+        from dimos.core.global_config import global_config
         from dimos.robot.unitree.go2.blueprints.smart.unitree_go2_spatial import (
             unitree_go2_spatial,
         )
@@ -39,6 +40,32 @@ def main() -> None:
             f"  underlying error: {e}\n"
         )
         sys.exit(1)
+
+    # ── git-lfs preflight ────────────────────────────────────────────────
+    if shutil.which("git-lfs") is None:
+        sys.stderr.write(
+            "git-lfs not found on PATH.\n"
+            "dimos fetches model weights (CLIP, YOLO) via git-lfs on first launch.\n"
+            "Install:\n"
+            "  macOS:    brew install git-lfs && git lfs install\n"
+            "  Ubuntu:   sudo apt-get install -y git-lfs && git lfs install\n",
+        )
+        sys.exit(1)
+
+    # ── sim vs real-hardware switching ───────────────────────────────────
+    sim = os.environ.get("OV_SIM", "").lower() in ("1", "true", "yes")
+    if sim:
+        global_config.update(simulation=True)
+        sys.stderr.write("[blueprint] OV_SIM=1 → MujocoConnection\n")
+    else:
+        robot_ip = os.environ.get("ROBOT_IP")
+        if not robot_ip:
+            sys.stderr.write(
+                "ROBOT_IP not set — pointing the blueprint at real hardware will\n"
+                "fail without it. Set ROBOT_IP=<your Go2 IP> or run `make sim`.\n",
+            )
+            sys.exit(1)
+        global_config.update(robot_ip=robot_ip)
 
     from overwatch_patrol.clip_recorder import ClipRecorderModule
     from overwatch_patrol.query_module import SurveillanceQueryModule
@@ -61,7 +88,6 @@ def main() -> None:
         McpClient.blueprint(),
     )
 
-    # dimos runs blueprints via ModuleCoordinator.build(blueprint).loop().
     coordinator = ModuleCoordinator.build(go2_overwatch)
     coordinator.start_rpyc_service()
     coordinator.loop()
