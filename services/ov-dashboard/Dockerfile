@@ -4,7 +4,7 @@ RUN corepack enable
 
 FROM base AS builder
 WORKDIR /repo
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* tsconfig.base.json ./
 COPY packages ./packages
 COPY services/ov-dashboard ./services/ov-dashboard
 RUN pnpm install --frozen-lockfile=false
