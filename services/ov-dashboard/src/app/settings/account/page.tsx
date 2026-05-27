@@ -1,4 +1,5 @@
 import { Shell } from '@/components/Shell';
+import { SettingsTabs } from '@/components/SettingsTabs';
 import { apiFetch } from '@/lib/api';
 import { redirect } from 'next/navigation';
 import { AccountForm } from './AccountForm';
@@ -20,6 +21,7 @@ export default async function Page() {
   return (
     <Shell>
       <div className="p-4 max-w-2xl space-y-6">
+        <SettingsTabs />
         <h1 className="mono uppercase text-sm tracking-[0.04em]">ACCOUNT</h1>
         <div className="card space-y-2 mono text-sm">
           <Row label="username" value={user.username} />

@@ -79,6 +79,12 @@
   }
   .dot-offline { background: var(--danger); animation: none; }
   .skeleton { @apply bg-surface-elev; min-height: 1rem; }
+  .kbd {
+    @apply mono inline-block px-1 py-px text-[9px] text-text border border-border-strong bg-surface;
+    line-height: 1;
+    min-width: 14px;
+    text-align: center;
+  }
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }

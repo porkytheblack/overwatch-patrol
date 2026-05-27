@@ -24,7 +24,7 @@ services:
       SQLITE_PATH: /data/overwatch.db
       SESSION_SECRET: ${SESSION_SECRET}
       BRIDGE_WS_URL: ${BRIDGE_WS_URL:-ws://host.docker.internal:7001/events}
-      ROBOT_MJPEG_URL: ${ROBOT_MJPEG_URL:-http://host.docker.internal:8080/video_feed/color_image}
+      ROBOT_MJPEG_URL: ${ROBOT_MJPEG_URL:-http://host.docker.internal:7001/video_feed/color_image}
       DEEP_LINK_SECRET: ${DEEP_LINK_SECRET}
       DEEP_LINK_TTL_HOURS: ${DEEP_LINK_TTL_HOURS:-24}
       DASHBOARD_BASE_URL: ${DASHBOARD_BASE_URL:-http://localhost:3001}
@@ -68,7 +68,7 @@ services:
     environment:
       OV_API_URL: http://ov-api:3000
       OV_API_PUBLIC_URL: ${OV_API_PUBLIC_URL:-http://localhost:3000}
-      OV_ROBOT_MJPEG: ${OV_ROBOT_MJPEG:-http://host.docker.internal:8080/video_feed/color_image}
+      OV_ROBOT_MJPEG: ${OV_ROBOT_MJPEG:-http://host.docker.internal:7001/video_feed/color_image}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

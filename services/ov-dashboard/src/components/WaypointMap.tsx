@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveStatus } from './LiveStatus';
+import { eventsWsUrl } from '@/lib/api';
 
 interface Waypoint {
   id: string;
@@ -61,6 +62,30 @@ export function WaypointMap({
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full block bg-black">
         {gridLines(bounds.minX, bounds.maxX, toX, W, H, 'x')}
         {gridLines(bounds.minY, bounds.maxY, toY, W, H, 'y')}
+        {waypoints.length === 0 && !robotPose && (
+          <g>
+            <text
+              x={W / 2}
+              y={H / 2 - 8}
+              textAnchor="middle"
+              fontSize="13"
+              fontFamily="var(--font-mono), monospace"
+              fill="#A3A3A3"
+            >
+              your waypoints will appear here
+            </text>
+            <text
+              x={W / 2}
+              y={H / 2 + 14}
+              textAnchor="middle"
+              fontSize="10"
+              fontFamily="var(--font-mono), monospace"
+              fill="#525252"
+            >
+              drive the robot, then click ADD
+            </text>
+          </g>
+        )}
         {waypoints.map((w) => {
           const x = toX(w.pose_x);
           const y = toY(w.pose_y);
@@ -140,9 +165,7 @@ function useRobotPose(): { x: number; y: number; yaw: number } | null {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let stopped = false;
-    const ws = new WebSocket(
-      `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`,
-    );
+    const ws = new WebSocket(eventsWsUrl('/ws'));
     ws.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data);

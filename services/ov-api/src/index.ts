@@ -10,6 +10,7 @@ import incidentRoutes from './routes/incidents.js';
 import subscriberRoutes from './routes/subscribers.js';
 import botConfigRoutes from './routes/bot-configs.js';
 import systemRoutes from './routes/system.js';
+import surveillanceRoutes from './routes/surveillance.js';
 import { fanout } from './ws.js';
 
 const app = new Hono();
@@ -26,6 +27,7 @@ app.route('/api/incidents', incidentRoutes);
 app.route('/api/subscribers', subscriberRoutes);
 app.route('/api/bot-configs', botConfigRoutes);
 app.route('/api/system', systemRoutes);
+app.route('/api/surveillance', surveillanceRoutes);
 
 app.get('/openapi.json', (c) => c.json(openapi));
 

@@ -48,6 +48,26 @@ def _load_dotenv() -> None:
 def main() -> None:
     _load_dotenv()
 
+    # Default viewer to "none" BEFORE any dimos import.
+    #
+    # `unitree_go2_basic` evaluates `global_config.viewer` at import time
+    # to decide whether to compose `RerunBridgeModule`. That module
+    # subscribes to all LCM topics via a plain `LCM()` pubsub and routes
+    # every payload through `Image.lcm_decode`, which raises
+    # `ValueError: Unsupported encoding: jpeg` for every JPEG-encoded
+    # frame our `_with_jpeglcm` transport publishes. The dashboard's
+    # LiveTile IS the operator's viewer here, so rerun is redundant.
+    #
+    # Operator opt-in: export VIEWER=rerun before `make sim` / `make
+    # robot` — pair with disabling _with_jpeglcm or accept the decode
+    # noise.
+    os.environ.setdefault("VIEWER", "none")
+    if os.environ.get("VIEWER") == "none":
+        sys.stderr.write(
+            "[blueprint] VIEWER=none → dimos rerun bridge disabled "
+            "(live view is in the dashboard).\n",
+        )
+
     try:
         from dimos.agents.mcp.mcp_client import McpClient
         from dimos.agents.mcp.mcp_server import McpServer
@@ -84,7 +104,7 @@ def main() -> None:
     # so they reach the worker subprocesses (a main-process
     # global_config.update() doesn't propagate).
     sim = os.environ.get("OV_SIM", "").lower() in ("1", "true", "yes")
-    g_overrides: dict = {}
+    g_overrides: dict = {"viewer": os.environ.get("VIEWER", "none")}
     if sim:
         g_overrides["simulation"] = True
         sys.stderr.write("[blueprint] OV_SIM=1 → MujocoConnection\n")
@@ -119,9 +139,14 @@ def main() -> None:
             "[blueprint] OPENAI_API_KEY unset → LocalSpeakSkill (offline OS TTS).\n",
         )
 
+    # `_with_jpeglcm` IS `unitree_go2` with a JpegLcmTransport overriding the
+    # default `color_image` transport. Don't pass plain `unitree_go2` again
+    # afterwards — dimos's `autoconnect` merges transport_maps in order with
+    # "later wins", so `unitree_go2`'s pSHMTransport (on Mac) would silently
+    # clobber the JPEG-over-LCM override and our bridge would never see
+    # `/color_image` frames.
     go2_overwatch = autoconnect(
         _with_jpeglcm,
-        unitree_go2,
         # In-memory stub satisfies the SpatialMemorySpec that
         # NavigationSkillContainer requires, without needing CLIP / ChromaDB
         # (which require a CUDA GPU and a writable assets dir).

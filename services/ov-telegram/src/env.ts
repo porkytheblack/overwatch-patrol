@@ -45,6 +45,22 @@ function canWrite(path: string): boolean {
   }
 }
 
+/** See services/ov-api/src/env.ts — same host-remap logic. */
+const IN_CONTAINER = canWrite('/data');
+let hostRemapWarned = false;
+function remapDockerHost(url: string, label: string): string {
+  if (IN_CONTAINER || !url.includes('host.docker.internal')) return url;
+  const remapped = url.replace(/host\.docker\.internal/g, 'localhost');
+  if (!hostRemapWarned) {
+    process.stderr.write(
+      `[env] host.docker.internal unreachable on this host; remapping URLs to localhost ` +
+        `(${label}: ${url} → ${remapped}). Set explicit URLs in .env to silence.\n`,
+    );
+    hostRemapWarned = true;
+  }
+  return remapped;
+}
+
 const raw = z
   .object({
     SQLITE_PATH: z.string().default('/data/overwatch.db'),
@@ -156,6 +172,8 @@ export const ENV = {
   ...raw,
   SQLITE_PATH: resolveDataPath(raw.SQLITE_PATH, 'overwatch.db'),
   STATION_DB_PATH: resolveDataPath(raw.STATION_DB_PATH, 'station.db'),
+  BRIDGE_WS_URL: remapDockerHost(raw.BRIDGE_WS_URL, 'BRIDGE_WS_URL'),
+  MCP_URL: remapDockerHost(raw.MCP_URL, 'MCP_URL'),
   /** Resolved LLM config — null if no provider is configured. */
   AGENT: resolveProvider(),
 };

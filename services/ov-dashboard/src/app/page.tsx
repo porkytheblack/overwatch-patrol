@@ -49,7 +49,16 @@ export default async function Page() {
           </div>
           <div className="border-t border-border">
             {incidents.length === 0 && (
-              <div className="text-text-dim mono text-sm py-4">no incidents yet</div>
+              <div className="mono text-sm py-4 space-y-1">
+                <div className="text-text-muted">no incidents yet</div>
+                <div className="text-text-dim text-xs">
+                  add waypoints in{' '}
+                  <Link href="/patrol" className="text-accent">
+                    /patrol
+                  </Link>{' '}
+                  and press START PATROL to begin
+                </div>
+              </div>
             )}
             {incidents.map((i) => (
               <Link

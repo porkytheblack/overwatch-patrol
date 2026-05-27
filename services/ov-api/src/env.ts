@@ -60,14 +60,45 @@ function canWrite(path: string): boolean {
   }
 }
 
+/**
+ * `host.docker.internal` resolves only inside Docker containers. On a bare
+ * macOS / Linux host (e.g. `make dev-host`), any URL pointing at it would
+ * raise ENOTFOUND. We use the same in-container heuristic as the SQLITE
+ * remap (writable `/data`) and rewrite the host portion to `localhost` so
+ * outbound fetches/WS connects work without forcing the operator to keep
+ * two .env files in sync.
+ */
+const IN_CONTAINER = canWrite('/data');
+let hostRemapWarned = false;
+function remapDockerHost(url: string | undefined, label: string): string | undefined {
+  if (!url || IN_CONTAINER) return url;
+  if (!url.includes('host.docker.internal')) return url;
+  const remapped = url.replace(/host\.docker\.internal/g, 'localhost');
+  if (!hostRemapWarned) {
+    process.stderr.write(
+      `[env] host.docker.internal unreachable on this host; remapping URLs to localhost ` +
+        `(${label}: ${url} → ${remapped}). Set explicit URLs in .env to silence.\n`,
+    );
+    hostRemapWarned = true;
+  }
+  return remapped;
+}
+
 const env = z
   .object({
     SQLITE_PATH: z.string().optional(),
     SESSION_SECRET: z.string().min(16),
     BRIDGE_WS_URL: z.string().default('ws://host.docker.internal:7001/events'),
+    // The ov-bridge subscribes to the robot's `/color_image` LCM topic
+    // (already JPEG-encoded by `_with_jpeglcm`) and re-serves the frames as
+    // an MJPEG stream — keeping the spec's plane boundary intact (only
+    // ov-bridge ever speaks LCM). Override in .env if you ever wire the
+    // robot's dimos FastAPI video server directly.
     ROBOT_MJPEG_URL: z
       .string()
-      .default('http://host.docker.internal:8080/video_feed/color_image'),
+      .default('http://host.docker.internal:7001/video_feed/color_image'),
+    MCP_URL: z.string().default('http://host.docker.internal:9990/mcp'),
+    BRIDGE_HTTP_URL: z.string().default('http://host.docker.internal:7001'),
     DEEP_LINK_SECRET: z.string().min(16),
     DEEP_LINK_TTL_HOURS: z.coerce.number().int().positive().default(24),
     DASHBOARD_BASE_URL: z.string().default('http://localhost:3001'),
@@ -80,5 +111,11 @@ const env = z
 export const ENV = {
   ...env,
   SQLITE_PATH: resolveSqlitePath(env.SQLITE_PATH),
+  BRIDGE_WS_URL: remapDockerHost(env.BRIDGE_WS_URL, 'BRIDGE_WS_URL') ?? env.BRIDGE_WS_URL,
+  ROBOT_MJPEG_URL:
+    remapDockerHost(env.ROBOT_MJPEG_URL, 'ROBOT_MJPEG_URL') ?? env.ROBOT_MJPEG_URL,
+  MCP_URL: remapDockerHost(env.MCP_URL, 'MCP_URL') ?? env.MCP_URL,
+  BRIDGE_HTTP_URL:
+    remapDockerHost(env.BRIDGE_HTTP_URL, 'BRIDGE_HTTP_URL') ?? env.BRIDGE_HTTP_URL,
 };
 export type Env = typeof ENV;

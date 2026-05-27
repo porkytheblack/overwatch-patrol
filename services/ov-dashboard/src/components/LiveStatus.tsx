@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { eventsWsUrl } from '@/lib/api';
 
 type RobotState = 'IDLE' | 'PATROLLING' | 'INSPECTING' | 'COOLDOWN' | 'MANUAL_OVERRIDE' | 'OFFLINE';
 interface Status {
@@ -26,12 +27,38 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
   });
   const lastEvt = useRef(Date.now());
 
+  // Bootstrap from the robot's MCP server. The SurveillanceModule only
+  // publishes `robot.state_changed` on transitions, so a freshly-loaded
+  // dashboard would stay at "OFFLINE" until the next transition even
+  // when the robot is happily IDLE and streaming video. One eager fetch
+  // closes that gap.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/surveillance/state', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body: { state?: string } | null) => {
+        if (cancelled || !body?.state) return;
+        setStatus((s) => ({
+          ...s,
+          online: true,
+          state: body.state as RobotState,
+          last_event_at: new Date().toISOString(),
+        }));
+        lastEvt.current = Date.now();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let stopped = false;
     const connect = () => {
-      const ws = new WebSocket(
-        `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`,
-      );
+      // ov-api directly, not the dashboard origin — Next.js's rewrites
+      // can't proxy WS upgrades. localhost is host-only cookie scope so
+      // the session cookie reaches ov-api even cross-port.
+      const ws = new WebSocket(eventsWsUrl('/ws'));
       ws.onmessage = (e) => {
         try {
           const evt = JSON.parse(e.data);
@@ -45,7 +72,15 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
               current_waypoint_id: evt.waypoint_id ?? null,
             }));
           } else {
-            setStatus((s) => ({ ...s, online: true, last_event_at: new Date().toISOString() }));
+            setStatus((s) => ({
+              ...s,
+              online: true,
+              // Any LCM activity means the robot is up; if the explicit
+              // state machine hasn't told us otherwise yet, IDLE is the
+              // honest default (spec §8) rather than OFFLINE.
+              state: s.state === 'OFFLINE' ? 'IDLE' : s.state,
+              last_event_at: new Date().toISOString(),
+            }));
           }
         } catch {
           /* ignore */

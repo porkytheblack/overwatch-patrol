@@ -57,6 +57,73 @@ async def health_handler(_req: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def mjpeg_handler(req: web.Request) -> web.StreamResponse:
+    """Multipart MJPEG stream of the latest LCM /color_image frames.
+
+    Each consumer gets its own bounded queue from the FrameHub so a slow
+    client only stalls itself. The response stays open until the client
+    disconnects (StreamResponse.write raises) or the hub feeds a None
+    sentinel during shutdown.
+    """
+    hub = req.app.get("frames")
+    if hub is None:
+        return web.json_response({"error": "frames_disabled"}, status=503)
+
+    boundary = "frame"
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": f"multipart/x-mixed-replace; boundary={boundary}",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+    await resp.prepare(req)
+    q = await hub.subscribe()
+    try:
+        while True:
+            jpeg = await q.get()
+            if jpeg is None:
+                break
+            chunk = (
+                f"--{boundary}\r\n"
+                f"Content-Type: image/jpeg\r\n"
+                f"Content-Length: {len(jpeg)}\r\n\r\n"
+            ).encode("ascii") + jpeg + b"\r\n"
+            await resp.write(chunk)
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("mjpeg.stream_error", error=str(e))
+    finally:
+        await hub.unsubscribe(q)
+    return resp
+
+
+async def cmd_vel_handler(req: web.Request) -> web.Response:
+    """Publish a velocity command on `/cmd_vel`.
+
+    Body: {"linear_x": float, "linear_y": float, "angular_z": float}.
+    No auth here — the bridge sits on the trusted plane behind ov-api
+    (which gates this route with requireAuth).
+    """
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    publisher = req.app.get("cmd_vel")
+    if publisher is None:
+        return web.json_response({"error": "publisher_unavailable"}, status=503)
+    ok = publisher.publish(
+        float(payload.get("linear_x", 0)),
+        float(payload.get("linear_y", 0)),
+        float(payload.get("angular_z", 0)),
+    )
+    if not ok:
+        return web.json_response({"error": "lcm_unavailable"}, status=503)
+    return web.json_response({"ok": True})
+
+
 async def waypoint_sync_handler(req: web.Request) -> web.Response:
     """Internal RPC: called by `SurveillanceModule.add_waypoint` /
     `delete_waypoint` to upsert/delete a row. Mirrors the body of an LCM
@@ -81,12 +148,18 @@ async def waypoint_sync_handler(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def make_app(hub: WsHub, storage=None) -> web.Application:
+def make_app(hub: WsHub, storage=None, frames=None, cmd_vel=None) -> web.Application:
     app = web.Application()
     app["hub"] = hub
     if storage is not None:
         app["storage"] = storage
+    if frames is not None:
+        app["frames"] = frames
+    if cmd_vel is not None:
+        app["cmd_vel"] = cmd_vel
     app.router.add_get("/events", ws_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/sync/waypoint", waypoint_sync_handler)
+    app.router.add_post("/cmd_vel", cmd_vel_handler)
+    app.router.add_get("/video_feed/color_image", mjpeg_handler)
     return app

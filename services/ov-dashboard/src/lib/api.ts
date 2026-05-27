@@ -4,6 +4,31 @@ export const API_BASE =
     : '';
 
 /**
+ * Browser-side URL for direct connections to ov-api (WebSocket and
+ * other long-lived streams that Next.js's `rewrites()` proxy buffers
+ * or can't upgrade).
+ *
+ * Resolves at runtime in the browser; falls back to the same hostname
+ * on port 3000, which matches the dev-host + docker-compose defaults
+ * documented in .env.example. Override with `NEXT_PUBLIC_OV_API_URL`
+ * for production behind Caddy.
+ */
+export function browserApiBase(): string {
+  if (typeof window === 'undefined') return '';
+  const fromEnv = process.env.NEXT_PUBLIC_OV_API_URL;
+  if (fromEnv) return fromEnv.replace(/\/$/, '');
+  return `${window.location.protocol}//${window.location.hostname}:3000`;
+}
+
+/** WebSocket URL for the events firehose. */
+export function eventsWsUrl(path = '/ws'): string {
+  if (typeof window === 'undefined') return '';
+  const base = browserApiBase();
+  // http(s) → ws(s)
+  return base.replace(/^http/, 'ws') + path;
+}
+
+/**
  * Fetch wrapper that works in both browser and Server Components.
  *
  * In the browser, `credentials: 'include'` sends the session cookie

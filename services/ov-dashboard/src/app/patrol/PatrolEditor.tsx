@@ -62,14 +62,9 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
 
   return (
     <div className="space-y-2">
-      <div className="mono text-xs text-text-muted">
-        {waypoints.length} waypoint{waypoints.length === 1 ? '' : 's'} · drive the robot to a
-        position and add via Telegram (<code className="mono">/add front_gate</code>) or a paired
-        controller
+      <div className="mono text-xs text-text-dim">
+        click a waypoint to configure targets · ↑↓ to reorder · DELETE to remove
       </div>
-      {waypoints.length === 0 && (
-        <div className="card text-text-dim mono text-sm">no waypoints · drive the robot to a position and add one</div>
-      )}
       {waypoints.map((w) => (
         <details key={w.id} className="card">
           <summary className="cursor-pointer flex items-center gap-3 list-none">

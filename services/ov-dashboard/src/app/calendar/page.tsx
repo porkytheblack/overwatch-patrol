@@ -9,9 +9,11 @@ interface Incident {
   status: string;
 }
 
-async function getIncidents(): Promise<Incident[]> {
+async function getIncidents(from: string, to: string): Promise<Incident[]> {
   try {
-    const { incidents } = await apiFetch<{ incidents: Incident[] }>('/api/incidents?limit=2000');
+    const { incidents } = await apiFetch<{ incidents: Incident[] }>(
+      `/api/incidents?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=2000`,
+    );
     return incidents;
   } catch {
     redirect('/login');
@@ -19,7 +21,15 @@ async function getIncidents(): Promise<Incident[]> {
 }
 
 export default async function Page() {
-  const incidents = await getIncidents();
+  const today = new Date();
+  const first = new Date(today.getFullYear(), today.getMonth(), 1);
+  const last = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  const incidents = await getIncidents(
+    new Date(Date.UTC(first.getFullYear(), first.getMonth(), 1)).toISOString(),
+    new Date(
+      Date.UTC(last.getFullYear(), last.getMonth(), last.getDate(), 23, 59, 59, 999),
+    ).toISOString(),
+  );
 
   const counts = new Map<string, number>();
   const hourly = new Map<string, number[]>();
@@ -31,8 +41,6 @@ export default async function Page() {
     hourly.get(day)![h]++;
   }
 
-  const today = new Date();
-  const first = new Date(today.getFullYear(), today.getMonth(), 1);
   const days: Date[] = [];
   for (let d = new Date(first); d.getMonth() === today.getMonth(); d.setDate(d.getDate() + 1)) {
     days.push(new Date(d));
