@@ -4,12 +4,18 @@ buffer + MP4 writer with bbox overlays (spec §7.3).
 """
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import subprocess
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+
+log = logging.getLogger("overwatch_patrol.clip_recorder_core")
 
 
 @dataclass
@@ -69,6 +75,12 @@ class ClipRecorderCore:
     def on_incident_opened(self, incident_id: str) -> None:
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
         out_mp4 = os.path.join(self.config.output_dir, f"{incident_id}.mp4")
+        log.info(
+            "clip_recorder.opening incident_id=%s out=%s pre_roll_frames=%d",
+            incident_id,
+            out_mp4,
+            len(self._frames),
+        )
         clip = ActiveClip(
             incident_id=incident_id,
             path=out_mp4,
@@ -82,24 +94,44 @@ class ClipRecorderCore:
     def on_incident_closed(self, incident_id: str) -> None:
         clip = self._active.get(incident_id)
         if not clip:
+            log.warning(
+                "clip_recorder.closing_unknown incident_id=%s active=%s",
+                incident_id,
+                list(self._active.keys()),
+            )
             return
+        log.info(
+            "clip_recorder.closing incident_id=%s frames=%d post_roll_s=%.1f",
+            incident_id,
+            clip.frame_count,
+            self.config.post_roll_s,
+        )
         clip.schedule_close(self.config.post_roll_s)
 
     def tick(self, now: float) -> None:
         finished: list[str] = []
         for iid, clip in self._active.items():
             if clip.is_finished(now):
-                clip.finalize()
-                self.publish_lcm(
-                    "/ow/clip_ready",
-                    {
-                        "type": "clip.ready",
-                        "incident_id": iid,
-                        "clip_path": clip.path,
-                        "poster_path": clip.poster_path,
-                        "duration_ms": clip.duration_ms,
-                    },
+                log.info(
+                    "clip_recorder.finalising incident_id=%s frames=%d",
+                    iid,
+                    clip.frame_count,
                 )
+                clip.finalize()
+                payload = {
+                    "type": "clip.ready",
+                    "incident_id": iid,
+                    "clip_path": clip.path,
+                    "poster_path": clip.poster_path,
+                    "duration_ms": clip.duration_ms,
+                }
+                log.info(
+                    "clip_recorder.publishing_ready incident_id=%s clip=%s poster=%s",
+                    iid,
+                    clip.path,
+                    clip.poster_path,
+                )
+                self.publish_lcm("/ow/clip_ready", payload)
                 finished.append(iid)
         for iid in finished:
             del self._active[iid]
@@ -117,37 +149,99 @@ class ActiveClip:
     _started_at: Optional[float] = None
     _close_at: Optional[float] = None
     _last_ts: float = 0.0
+    _stderr_buf: list[str] = field(default_factory=list)
+    _stderr_thread: Optional[threading.Thread] = None
 
     def __post_init__(self) -> None:
         self.poster_path = self.path[:-4] + ".jpg"
 
     def _start_ffmpeg(self) -> None:
-        self._proc = subprocess.Popen(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "bgr24",
-                "-s",
-                f"{self.config.width}x{self.config.height}",
-                "-r",
-                str(self.config.fps),
-                "-i",
-                "-",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                self.path,
-            ],
-            stdin=subprocess.PIPE,
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{self.config.width}x{self.config.height}",
+            "-r",
+            str(self.config.fps),
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            self.path,
+        ]
+        log.info(
+            "clip_recorder.ffmpeg_start incident_id=%s bin=%s out=%s size=%dx%d fps=%d",
+            self.incident_id,
+            ffmpeg_bin,
+            self.path,
+            self.config.width,
+            self.config.height,
+            self.config.fps,
         )
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+            )
+        except FileNotFoundError as e:
+            log.error(
+                "clip_recorder.ffmpeg_missing incident_id=%s error=%s",
+                self.incident_id,
+                e,
+            )
+            self._proc = None
+            return
+        # Drain stderr in a background reader so it doesn't fill the pipe
+        # buffer and stall ffmpeg, and so failures actually surface in the
+        # log. Without this, libx264 build / pix_fmt / codec errors are
+        # invisible — the symptom is "clip stays pending forever".
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            daemon=True,
+            name=f"ffmpeg-stderr-{self.incident_id[:8]}",
+        )
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        if not self._proc or not self._proc.stderr:
+            return
+        try:
+            for raw in iter(self._proc.stderr.readline, b""):
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                self._stderr_buf.append(line)
+                if len(self._stderr_buf) > 200:
+                    self._stderr_buf.pop(0)
+                log.warning(
+                    "clip_recorder.ffmpeg_stderr incident_id=%s msg=%s",
+                    self.incident_id,
+                    line,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.debug(
+                "clip_recorder.stderr_reader_exit incident_id=%s error=%s",
+                self.incident_id,
+                e,
+            )
 
     def push_frame(self, ts: float, image_bgr: bytes, detections: list[dict]) -> None:
         if self._proc is None:
@@ -160,7 +254,12 @@ class ActiveClip:
             try:
                 self._proc.stdin.write(composited)
             except BrokenPipeError:
-                pass
+                # ffmpeg crashed. The stderr reader has the diagnostic.
+                log.error(
+                    "clip_recorder.ffmpeg_broken_pipe incident_id=%s",
+                    self.incident_id,
+                )
+                self._proc = None
         self._last_ts = ts
         self.frame_count += 1
 
@@ -171,19 +270,45 @@ class ActiveClip:
         return self._close_at is not None and now >= self._close_at
 
     def finalize(self) -> None:
+        rc: Optional[int] = None
         if self._proc and self._proc.stdin:
             try:
                 self._proc.stdin.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
-            self._proc.wait()
-        # Poster: middle frame of the actual clip duration.
-        if self.frame_count > 0:
+            try:
+                rc = self._proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                log.warning(
+                    "clip_recorder.ffmpeg_wait_timeout incident_id=%s",
+                    self.incident_id,
+                )
+                self._proc.kill()
+                rc = -1
+        if rc is not None and rc != 0:
+            tail = "\n".join(self._stderr_buf[-10:])
+            log.error(
+                "clip_recorder.ffmpeg_nonzero_exit incident_id=%s rc=%d stderr_tail=%s",
+                self.incident_id,
+                rc,
+                tail,
+            )
+        else:
+            log.info(
+                "clip_recorder.ffmpeg_exited incident_id=%s rc=%s frames=%d",
+                self.incident_id,
+                rc,
+                self.frame_count,
+            )
+        # Poster: middle frame of the actual clip duration. Only attempt
+        # if ffmpeg produced an mp4 file.
+        if self.frame_count > 0 and Path(self.path).exists() and Path(self.path).stat().st_size > 0:
             middle = max(0, self.frame_count // 2)
             try:
-                subprocess.run(
+                ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+                poster_result = subprocess.run(
                     [
-                        "ffmpeg",
+                        ffmpeg_bin,
                         "-y",
                         "-loglevel",
                         "error",
@@ -196,9 +321,28 @@ class ActiveClip:
                         self.poster_path,
                     ],
                     check=False,
+                    capture_output=True,
                 )
-            except Exception:
-                pass
+                if poster_result.returncode != 0:
+                    log.warning(
+                        "clip_recorder.poster_failed incident_id=%s rc=%d stderr=%s",
+                        self.incident_id,
+                        poster_result.returncode,
+                        poster_result.stderr.decode("utf-8", errors="replace").strip(),
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "clip_recorder.poster_exception incident_id=%s error=%s",
+                    self.incident_id,
+                    e,
+                )
+        else:
+            log.warning(
+                "clip_recorder.clip_missing_or_empty incident_id=%s path=%s exists=%s",
+                self.incident_id,
+                self.path,
+                Path(self.path).exists(),
+            )
         if self._started_at:
             self.duration_ms = (self._last_ts - self._started_at) * 1000
 

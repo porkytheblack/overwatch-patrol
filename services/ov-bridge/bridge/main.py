@@ -33,7 +33,20 @@ async def run(cfg: Config) -> None:
             elif topic == "/ow/incident_closed":
                 storage.update_incident_close(payload)
             elif topic == "/ow/clip_ready":
-                storage.update_clip_ready(payload)
+                changes = storage.update_clip_ready(payload)
+                log.info(
+                    "clip_ready.applied",
+                    incident_id=payload.get("incident_id"),
+                    clip_path=payload.get("clip_path"),
+                    rows_updated=changes,
+                )
+                if changes == 0:
+                    log.warning(
+                        "clip_ready.no_match",
+                        incident_id=payload.get("incident_id"),
+                        note="incident_id not found in SQLite — possible bridge restart "
+                        "between incident_opened and clip.ready",
+                    )
             elif topic == "/ow/robot_state":
                 storage.upsert_robot_status(payload)
             elif topic == "/ow/detections":

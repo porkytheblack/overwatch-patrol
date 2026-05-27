@@ -72,7 +72,12 @@ class Storage:
                 (evt["closed_at"], evt["status"], evt["incident_id"]),
             )
 
-    def update_clip_ready(self, evt: dict[str, Any]) -> None:
+    def update_clip_ready(self, evt: dict[str, Any]) -> int:
+        """Mark a pending incident as having its clip ready. Returns the
+        number of rows updated — callers log this so a missed UPDATE
+        (e.g. the bridge restarted between incident_opened and clip.ready)
+        is visible immediately.
+        """
         with self._tx() as cur:
             cur.execute(
                 """
@@ -82,6 +87,7 @@ class Storage:
                 """,
                 (evt["clip_path"], evt["poster_path"], evt["incident_id"]),
             )
+            return cur.rowcount
 
     def upsert_robot_status(self, evt: dict[str, Any]) -> None:
         pose = evt.get("pose") or {}
