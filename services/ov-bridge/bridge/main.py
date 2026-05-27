@@ -11,6 +11,7 @@ from .config import Config
 from .frame_hub import FrameHub
 from .lcm_listener import LcmListener
 from .logging_setup import setup_logging
+from .sport_pub import SportPublisher
 from .storage import Storage
 from .ws_server import WsHub, make_app
 
@@ -21,6 +22,7 @@ async def run(cfg: Config) -> None:
     hub = WsHub()
     frames = FrameHub()
     cmd_vel = CmdVelPublisher(lcm_url=cfg.lcm_url)
+    sport_pub = SportPublisher(lcm_url=cfg.lcm_url)
 
     async def dispatch(topic: str, payload: dict) -> None:
         event_type = payload.get("type") or topic
@@ -53,7 +55,9 @@ async def run(cfg: Config) -> None:
     listener = LcmListener(cfg.lcm_url, dispatch, frames=frames)
     await listener.start()
 
-    app = make_app(hub, storage, frames=frames, cmd_vel=cmd_vel)
+    app = make_app(
+        hub, storage, frames=frames, cmd_vel=cmd_vel, sport_pub=sport_pub,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", cfg.ws_port)

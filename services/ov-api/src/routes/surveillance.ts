@@ -134,16 +134,33 @@ const SportBody = z.object({
 /**
  * Run a Go2 sport-mode skill. The common ones: RecoveryStand (get up
  * after a fall), BalanceStand (re-engage active stance), Sit, StandUp,
- * Stretch, Hello. Spec §13 marks acrobatic ones (Backflip, FrontFlip,
- * Handstand, Bound, MoonWalk, etc.) as confirmation-required — we
- * proxy those too here, the confirmation step lives in the Telegram
- * agent.
+ * Stretch, Hello, FreeWalk.
+ *
+ * Goes through the bridge's `/sport` endpoint rather than MCP — the
+ * dimos RPC backplane on the 4G relay can hang for up to 120s on
+ * `execute_sport_command`, which made the dashboard's SportPanel
+ * buttons feel broken. The bridge publishes an `/ow/sport_request`
+ * LCM event; SurveillanceModule subscribes and pokes the WebRTC
+ * channel directly via its GO2ConnectionSpec injection. Round-trip
+ * is sub-second.
  */
 app.post('/sport', requireAuth, zValidator('json', SportBody), async (c) => {
   const { command } = c.req.valid('json');
-  const r = await callMcp('execute_sport_command', { command_name: command });
-  if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
-  return c.json({ ok: true, message: r.text });
+  try {
+    const res = await fetch(`${ENV.BRIDGE_HTTP_URL}/sport`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return c.json({ error: 'bridge_error', detail: text.slice(0, 200) }, 502);
+    }
+    return c.json({ ok: true, message: `${command} sent` });
+  } catch (e) {
+    log.warn('sport.bridge_unreachable', { err: String(e) });
+    return c.json({ error: 'bridge_unreachable' }, 502);
+  }
 });
 
 const AddWaypointBody = z.object({

@@ -100,6 +100,31 @@ async def mjpeg_handler(req: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def sport_request_handler(req: web.Request) -> web.Response:
+    """Publish a Go2 sport command on /ow/sport_request as std_msgs.String JSON.
+
+    Body: `{"command": "Hello"}`. SurveillanceModule subscribes to this
+    topic and calls `self._connection.publish_request(SPORT_MOD, ...)`
+    — bypasses MCP's RPC backplane entirely so the dashboard's
+    SportPanel buttons (and the auto-recovery watcher) don't hang for
+    120s when MCP is slow on the cellular relay path.
+    """
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    command = str(payload.get("command", "")).strip()
+    if not command:
+        return web.json_response({"error": "missing_command"}, status=400)
+    publisher = req.app.get("sport_pub")
+    if publisher is None:
+        return web.json_response({"error": "publisher_unavailable"}, status=503)
+    ok_ = publisher.publish_sport(command)
+    if not ok_:
+        return web.json_response({"error": "lcm_unavailable"}, status=503)
+    return web.json_response({"ok": True, "command": command})
+
+
 async def cmd_vel_handler(req: web.Request) -> web.Response:
     """Publish a velocity command on `/cmd_vel`.
 
@@ -148,7 +173,9 @@ async def waypoint_sync_handler(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def make_app(hub: WsHub, storage=None, frames=None, cmd_vel=None) -> web.Application:
+def make_app(
+    hub: WsHub, storage=None, frames=None, cmd_vel=None, sport_pub=None,
+) -> web.Application:
     app = web.Application()
     app["hub"] = hub
     if storage is not None:
@@ -157,9 +184,12 @@ def make_app(hub: WsHub, storage=None, frames=None, cmd_vel=None) -> web.Applica
         app["frames"] = frames
     if cmd_vel is not None:
         app["cmd_vel"] = cmd_vel
+    if sport_pub is not None:
+        app["sport_pub"] = sport_pub
     app.router.add_get("/events", ws_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/sync/waypoint", waypoint_sync_handler)
     app.router.add_post("/cmd_vel", cmd_vel_handler)
+    app.router.add_post("/sport", sport_request_handler)
     app.router.add_get("/video_feed/color_image", mjpeg_handler)
     return app
