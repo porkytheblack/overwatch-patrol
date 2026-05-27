@@ -1,4 +1,17 @@
+import { config as loadDotenv } from 'dotenv';
+import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+
+// Load .env from the repo root so `pnpm migrate`, `pnpm seed`, and `tsx watch`
+// all see operator-supplied secrets without any extra flags. In Docker
+// compose the env comes from the `environment:` section and the repo-root
+// .env is absent — dotenv silently no-ops.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(__dirname, '..', '..', '..');
+const dotenvPath = join(repoRoot, '.env');
+if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
 
 const env = z
   .object({
