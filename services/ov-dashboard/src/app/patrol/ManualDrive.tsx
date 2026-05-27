@@ -1,25 +1,91 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLiveStatus } from '@/components/LiveStatus';
 
 /**
- * Manual drive controls. Each click sends a single `relative_move` step
- * over MCP. Hold-to-repeat is intentionally not wired — sport command
- * confirmation rules (spec §13) want every motion to be an explicit
- * operator action, and the spec's nav skills already do their own
- * obstacle avoidance during each step.
+ * Game-style robot teleop.
+ *
+ * Reality check: dimos's `relative_move` is goal-based, not velocity-
+ * based, so we can't stream a true cmd_vel from the browser without
+ * wiring a new transport. Instead we fire short overlapping
+ * `relative_move` steps while a key (or button) is held — each tick
+ * commits the next ~0.15m step. The robot is allowed to start the
+ * next step before the previous one fully settles, so motion feels
+ * continuous enough for a Go2.
+ *
+ * Bindings:
+ *   W / ↑ = forward       S / ↓ = back
+ *   A      = strafe left   D     = strafe right
+ *   ← / Q  = rotate CCW    → / E = rotate CW
+ *   space  = stop          shift = sprint (1.5× step)
+ *
+ * Keys are ignored when the operator is typing in an input/textarea
+ * so naming a waypoint doesn't accidentally drive the robot.
  */
+type Dir = 'fwd' | 'back' | 'left' | 'right' | 'rotL' | 'rotR';
+
+const KEY_MAP: Record<string, Dir> = {
+  w: 'fwd',
+  W: 'fwd',
+  ArrowUp: 'fwd',
+  s: 'back',
+  S: 'back',
+  ArrowDown: 'back',
+  a: 'left',
+  A: 'left',
+  d: 'right',
+  D: 'right',
+  q: 'rotL',
+  Q: 'rotL',
+  ArrowLeft: 'rotL',
+  e: 'rotR',
+  E: 'rotR',
+  ArrowRight: 'rotR',
+};
+
+const TICK_MS = 220;
+const STEP_M = 0.18;
+const TURN_DEG = 18;
+
 export function ManualDrive() {
   const { online } = useLiveStatus();
-  const [busy, setBusy] = useState(false);
+  const [held, setHeld] = useState<Set<Dir>>(new Set());
+  const [sprint, setSprint] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  // Step sizes match dimos's NavigationSkillContainer defaults.
-  const [step, setStep] = useState(0.3); // metres
-  const [turn, setTurn] = useState(30); // degrees
+  const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heldRef = useRef<Set<Dir>>(new Set());
+  const sprintRef = useRef(false);
+  const inFlightRef = useRef(false);
 
-  async function move(forward: number, left: number, degrees: number) {
-    setBusy(true);
-    setMsg(null);
+  // Mirror state into refs so the ticker callback doesn't capture stale values.
+  useEffect(() => {
+    heldRef.current = held;
+  }, [held]);
+  useEffect(() => {
+    sprintRef.current = sprint;
+  }, [sprint]);
+
+  function press(d: Dir) {
+    setHeld((s) => {
+      if (s.has(d)) return s;
+      const next = new Set(s);
+      next.add(d);
+      return next;
+    });
+  }
+
+  function release(d: Dir) {
+    setHeld((s) => {
+      if (!s.has(d)) return s;
+      const next = new Set(s);
+      next.delete(d);
+      return next;
+    });
+  }
+
+  async function sendMove(forward: number, left: number, degrees: number) {
+    if (inFlightRef.current) return; // Skip overlapping; robot will be commanded next tick.
+    inFlightRef.current = true;
     try {
       const res = await fetch('/api/surveillance/move', {
         method: 'POST',
@@ -27,138 +93,241 @@ export function ManualDrive() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ forward, left, degrees }),
       });
-      const body = (await res.json().catch(() => ({}))) as {
-        message?: string;
-        error?: string;
-      };
-      setMsg(res.ok ? body.message ?? 'ok' : body.error ?? `failed (${res.status})`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setMsg(body.error ?? `move failed (${res.status})`);
+      } else {
+        setMsg(null);
+      }
+    } catch (e) {
+      setMsg(`move failed: ${String(e).slice(0, 60)}`);
     } finally {
-      setBusy(false);
+      inFlightRef.current = false;
     }
   }
 
   async function halt() {
-    setBusy(true);
-    setMsg(null);
+    setHeld(new Set());
     try {
-      const res = await fetch('/api/surveillance/halt', {
+      await fetch('/api/surveillance/halt', {
         method: 'POST',
         credentials: 'include',
       });
-      const body = (await res.json().catch(() => ({}))) as {
-        message?: string;
-        error?: string;
-      };
-      setMsg(res.ok ? body.message ?? 'halted' : body.error ?? `failed (${res.status})`);
-    } finally {
-      setBusy(false);
+      setMsg('stopped');
+    } catch {
+      /* ignore */
     }
   }
 
-  const disabled = busy || !online;
+  // Ticker: while any direction is held, fire a step every TICK_MS.
+  useEffect(() => {
+    if (held.size === 0) {
+      if (tickerRef.current) {
+        clearInterval(tickerRef.current);
+        tickerRef.current = null;
+      }
+      return;
+    }
+    if (tickerRef.current) return;
+    const tick = () => {
+      const s = heldRef.current;
+      if (s.size === 0) return;
+      const mult = sprintRef.current ? 1.5 : 1;
+      let fwd = 0;
+      let lft = 0;
+      let deg = 0;
+      if (s.has('fwd')) fwd += STEP_M * mult;
+      if (s.has('back')) fwd -= STEP_M * mult;
+      if (s.has('left')) lft += STEP_M * mult;
+      if (s.has('right')) lft -= STEP_M * mult;
+      if (s.has('rotL')) deg += TURN_DEG * mult;
+      if (s.has('rotR')) deg -= TURN_DEG * mult;
+      if (fwd !== 0 || lft !== 0 || deg !== 0) sendMove(fwd, lft, deg);
+    };
+    tick(); // fire one immediately
+    tickerRef.current = setInterval(tick, TICK_MS);
+    return () => {
+      if (tickerRef.current) {
+        clearInterval(tickerRef.current);
+        tickerRef.current = null;
+      }
+    };
+  }, [held]);
+
+  // Keyboard input — ignore when the operator is typing.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isTyping = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return (
+        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
+      );
+    };
+    const down = (e: KeyboardEvent) => {
+      if (isTyping(e.target)) return;
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        halt();
+        return;
+      }
+      if (e.key === 'Shift') {
+        setSprint(true);
+        return;
+      }
+      const dir = KEY_MAP[e.key];
+      if (!dir) return;
+      e.preventDefault();
+      press(dir);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setSprint(false);
+        return;
+      }
+      const dir = KEY_MAP[e.key];
+      if (!dir) return;
+      release(dir);
+    };
+    const blur = () => {
+      setHeld(new Set());
+      setSprint(false);
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
+    };
+  }, []);
+
+  const disabled = !online;
+
   return (
     <div className="card space-y-3">
-      <div className="flex items-baseline gap-3">
+      <div className="flex items-baseline justify-between">
         <span className="mono uppercase text-[10px] text-text-dim tracking-[0.04em]">
           manual drive
         </span>
-        {!online && (
-          <span className="mono text-xs text-text-dim">robot offline · run `make sim` / `make robot`</span>
+        {sprint && (
+          <span className="mono text-[10px] text-accent uppercase tracking-[0.04em]">
+            sprint
+          </span>
         )}
       </div>
 
-      <div className="grid grid-cols-3 gap-1 max-w-[180px]">
+      {/* D-pad: 5×3 grid sized for finger taps. Pointer events for
+          press/release so it works on touch too. */}
+      <div
+        className="grid gap-1"
+        style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr' }}
+      >
+        {/* row 1 */}
+        <PadBtn label="Q" hint="rot ←" dir="rotL" held={held} disabled={disabled} onPress={press} onRelease={release} />
         <div />
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(step, 0, 0)}
-          title={`forward ${step}m`}
-        >
-          ↑
-        </button>
+        <PadBtn label="W" hint="fwd" dir="fwd" held={held} disabled={disabled} onPress={press} onRelease={release} />
         <div />
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(0, step, 0)}
-          title={`left ${step}m`}
-        >
-          ←
-        </button>
-        <button
-          className="btn btn-danger"
-          disabled={disabled}
-          onClick={halt}
-          title="stop"
-        >
-          ■
-        </button>
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(0, -step, 0)}
-          title={`right ${step}m`}
-        >
-          →
-        </button>
+        <PadBtn label="E" hint="rot →" dir="rotR" held={held} disabled={disabled} onPress={press} onRelease={release} />
+        {/* row 2 */}
         <div />
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(-step, 0, 0)}
-          title={`back ${step}m`}
-        >
-          ↓
-        </button>
+        <PadBtn label="A" hint="strafe ←" dir="left" held={held} disabled={disabled} onPress={press} onRelease={release} />
+        <StopBtn disabled={disabled} onPress={halt} />
+        <PadBtn label="D" hint="strafe →" dir="right" held={held} disabled={disabled} onPress={press} onRelease={release} />
         <div />
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(0, 0, turn)}
-          title={`rotate +${turn}°`}
-        >
-          ⟲
-        </button>
+        {/* row 3 */}
         <div />
-        <button
-          className="btn"
-          disabled={disabled}
-          onClick={() => move(0, 0, -turn)}
-          title={`rotate −${turn}°`}
-        >
-          ⟳
-        </button>
+        <div />
+        <PadBtn label="S" hint="back" dir="back" held={held} disabled={disabled} onPress={press} onRelease={release} />
+        <div />
+        <div />
       </div>
 
-      <div className="flex flex-wrap gap-3 mono text-xs text-text-dim items-center">
-        <label className="flex items-center gap-1">
-          <span className="uppercase tracking-[0.04em]">step (m)</span>
-          <input
-            type="number"
-            className="input w-16"
-            step={0.1}
-            min={0.05}
-            max={1}
-            value={step}
-            onChange={(e) => setStep(Number(e.target.value))}
-          />
-        </label>
-        <label className="flex items-center gap-1">
-          <span className="uppercase tracking-[0.04em]">turn (°)</span>
-          <input
-            type="number"
-            className="input w-16"
-            step={5}
-            min={5}
-            max={180}
-            value={turn}
-            onChange={(e) => setTurn(Number(e.target.value))}
-          />
-        </label>
+      <div className="mono text-[10px] text-text-dim leading-snug">
+        keyboard: <kbd className="kbd">W</kbd>/<kbd className="kbd">A</kbd>/
+        <kbd className="kbd">S</kbd>/<kbd className="kbd">D</kbd> drive ·{' '}
+        <kbd className="kbd">Q</kbd>/<kbd className="kbd">E</kbd> rotate ·{' '}
+        <kbd className="kbd">Shift</kbd> sprint · <kbd className="kbd">Space</kbd> stop
       </div>
-
-      {msg && <div className="mono text-xs text-text-muted truncate">{msg}</div>}
+      {!online && (
+        <div className="mono text-[10px] text-text-dim">robot offline · start `make sim`</div>
+      )}
+      {msg && <div className="mono text-[10px] text-text-muted truncate">{msg}</div>}
     </div>
+  );
+}
+
+function PadBtn({
+  label,
+  hint,
+  dir,
+  held,
+  disabled,
+  onPress,
+  onRelease,
+}: {
+  label: string;
+  hint: string;
+  dir: Dir;
+  held: Set<Dir>;
+  disabled: boolean;
+  onPress: (d: Dir) => void;
+  onRelease: (d: Dir) => void;
+}) {
+  const active = held.has(dir);
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+        onPress(dir);
+      }}
+      onPointerUp={(e) => {
+        try {
+          (e.currentTarget as HTMLButtonElement).releasePointerCapture(e.pointerId);
+        } catch {
+          /* fine */
+        }
+        onRelease(dir);
+      }}
+      onPointerCancel={() => onRelease(dir)}
+      onPointerLeave={(e) => {
+        // If the operator drags off the button while still held, treat
+        // as release — otherwise the robot would keep moving.
+        if (held.has(dir)) onRelease(dir);
+      }}
+      className={`h-14 flex flex-col items-center justify-center mono text-sm border tracking-[0.04em] transition-colors select-none ${
+        active
+          ? 'bg-accent text-black border-accent'
+          : 'bg-surface text-text border-border-strong hover:bg-surface-elev'
+      } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+      title={hint}
+    >
+      <span>{label}</span>
+      <span className="text-[9px] text-text-dim mt-0.5">{hint}</span>
+    </button>
+  );
+}
+
+function StopBtn({ disabled, onPress }: { disabled: boolean; onPress: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onPress}
+      className={`h-14 flex flex-col items-center justify-center mono text-sm border tracking-[0.04em] transition-colors select-none ${
+        disabled
+          ? 'opacity-40 cursor-not-allowed border-border-strong'
+          : 'border-danger text-danger hover:bg-surface-elev'
+      }`}
+      title="stop · space"
+    >
+      <span>■</span>
+      <span className="text-[9px] mt-0.5">stop</span>
+    </button>
   );
 }
