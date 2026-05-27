@@ -1,4 +1,15 @@
+import { config as loadDotenv } from 'dotenv';
+import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+
+// Auto-load .env from the repo root for local dev. In Docker compose the
+// env comes from the `environment:` section and .env isn't mounted — dotenv
+// silently no-ops then.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const dotenvPath = join(__dirname, '..', '..', '..', '.env');
+if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
 
 const raw = z
   .object({

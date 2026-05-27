@@ -1,10 +1,30 @@
-.PHONY: setup setup-sim robot sim dev down logs seed reset codegen migrate e2e dev-dimos
+.PHONY: setup setup-sim ensure-env robot sim dev down logs seed reset codegen migrate e2e dev-dimos
 
 SVC ?=
 
+# Ensure a .env exists with sane secrets. Generates one from .env.example
+# and fills in SESSION_SECRET / DEEP_LINK_SECRET via openssl if they're
+# still the placeholders.
+ensure-env:
+	@if [ ! -f .env ]; then \
+		echo "▸ creating .env from .env.example"; \
+		cp .env.example .env; \
+	fi
+	@if grep -q '^SESSION_SECRET=change-me' .env 2>/dev/null; then \
+		echo "▸ generating SESSION_SECRET"; \
+		secret="$$(openssl rand -hex 32)"; \
+		sed -i.bak "s|^SESSION_SECRET=.*|SESSION_SECRET=$$secret|" .env && rm -f .env.bak; \
+	fi
+	@if grep -q '^DEEP_LINK_SECRET=change-me' .env 2>/dev/null; then \
+		echo "▸ generating DEEP_LINK_SECRET"; \
+		secret="$$(openssl rand -hex 32)"; \
+		sed -i.bak "s|^DEEP_LINK_SECRET=.*|DEEP_LINK_SECRET=$$secret|" .env && rm -f .env.bak; \
+	fi
+	@echo "✓ .env ready"
+
 # ---- Python ---------------------------------------------------------------
 
-setup:
+setup: ensure-env
 	@echo "▸ creating uv venv (Python 3.12)"
 	@uv venv --python "3.12" || true
 	@echo "▸ installing dimos[base,unitree] from PyPI"
@@ -19,7 +39,7 @@ setup:
 	pnpm -F @overwatch/api migrate
 	@echo "✓ setup complete"
 
-setup-sim:
+setup-sim: ensure-env
 	@echo "▸ creating uv venv (Python 3.12)"
 	@uv venv --python "3.12" || true
 	@echo "▸ installing dimos[base,unitree,sim] (Mujoco backend)"
@@ -45,7 +65,7 @@ sim:
 
 # ---- App plane ------------------------------------------------------------
 
-dev:
+dev: ensure-env
 	docker compose up -d --build
 
 down:
@@ -68,7 +88,7 @@ reset:
 codegen:
 	pnpm -F @overwatch/schemas codegen
 
-migrate:
+migrate: ensure-env
 	pnpm -F @overwatch/api migrate
 
 e2e:

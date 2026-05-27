@@ -22,6 +22,7 @@
     "@overwatch/shared-ts": "workspace:*",
     "argon2": "^0.41.1",
     "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",
     "hono": "^4.6.10",
     "lucia": "^3.2.2",
