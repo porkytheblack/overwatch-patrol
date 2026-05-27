@@ -9,11 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 import structlog
 
 from .frame_hub import FrameHub
+
+# Wordmark "amber pulse" indicator (spec §0) needs a signal that LCM is
+# flowing from the robot. /color_image arrives every frame (~14Hz) while
+# /ow/* events fire only on state transitions; rather than burn WS
+# bandwidth at video rate, the image handler synthesizes a heartbeat at
+# most once per second.
+HEARTBEAT_TOPIC = "/ow/heartbeat"
+HEARTBEAT_MIN_INTERVAL_S = 1.0
 
 log = structlog.get_logger()
 
@@ -98,6 +108,7 @@ class LcmListener:
 
         if LCMImage is not None and self.frames is not None:
             frames = self.frames
+            heartbeat_state = {"last": 0.0}
 
             def _image_handler(_channel: str, data: bytes) -> None:
                 try:
@@ -109,6 +120,17 @@ class LcmListener:
                     return
                 jpeg = bytes(msg.data[: msg.data_length])
                 frames.publish_threadsafe(jpeg, loop)
+
+                now = time.monotonic()
+                if now - heartbeat_state["last"] >= HEARTBEAT_MIN_INTERVAL_S:
+                    heartbeat_state["last"] = now
+                    payload = {
+                        "type": "robot.heartbeat",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                    asyncio.run_coroutine_threadsafe(
+                        self.on_event(HEARTBEAT_TOPIC, payload), loop,
+                    )
 
             lc.subscribe(IMAGE_TOPIC_REGEX, _image_handler)
             log.info("lcm.subscribed_image", topic=IMAGE_TOPIC_REGEX)

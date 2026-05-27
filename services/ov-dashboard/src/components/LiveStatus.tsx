@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { eventsWsUrl } from '@/lib/api';
 
 type RobotState = 'IDLE' | 'PATROLLING' | 'INSPECTING' | 'COOLDOWN' | 'MANUAL_OVERRIDE' | 'OFFLINE';
 interface Status {
@@ -29,9 +30,10 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let stopped = false;
     const connect = () => {
-      const ws = new WebSocket(
-        `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`,
-      );
+      // ov-api directly, not the dashboard origin — Next.js's rewrites
+      // can't proxy WS upgrades. localhost is host-only cookie scope so
+      // the session cookie reaches ov-api even cross-port.
+      const ws = new WebSocket(eventsWsUrl('/ws'));
       ws.onmessage = (e) => {
         try {
           const evt = JSON.parse(e.data);

@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveStatus } from './LiveStatus';
+import { eventsWsUrl } from '@/lib/api';
 
 interface Waypoint {
   id: string;
@@ -140,9 +141,7 @@ function useRobotPose(): { x: number; y: number; yaw: number } | null {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let stopped = false;
-    const ws = new WebSocket(
-      `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`,
-    );
+    const ws = new WebSocket(eventsWsUrl('/ws'));
     ws.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data);
