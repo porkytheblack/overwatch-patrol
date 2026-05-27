@@ -1,14 +1,18 @@
 """go2_overwatch — full robot stack composition.
 
-Composes dimos's `unitree_go2_spatial` blueprint with our extension modules,
-plus the dimos `McpServer` so every `@skill` (control + read-only queries)
-is reachable at `http://robot:9990/mcp`.
+Composes dimos's Go2 navigation stack with our extension modules
+(SurveillanceModule, ClipRecorderModule, SurveillanceQueryModule) plus
+the dimos `McpServer` so every `@skill` is reachable at
+`http://robot:9990/mcp`.
 
-Run with `make robot` (real Go2, requires `ROBOT_IP`) or `make sim` (Mujoco).
+Run with `make robot` (real Go2, requires `ROBOT_IP`) or `make sim`
+(Mujoco, `OV_SIM=1`).
 
-Prereqs: dimos installed (`make setup` / `make setup-sim`) and git-lfs on
-PATH (dimos's SpatialMemory + SecurityModule fetch CLIP / YOLO weights via
-git-lfs on first launch). On macOS: `brew install git-lfs`.
+We deliberately use `unitree_go2` (navigation + costmap + planning) instead
+of `unitree_go2_spatial`. The spatial blueprint pulls in dimos's
+`SecurityModule` (CUDA-only EdgeTAM segmenter) and `SpatialMemory` (CLIP
+embeddings) which we don't need — our `SurveillanceModule` is the
+v1-spec surveillance brain, and SpatialMemory is reserved for v2.
 """
 from __future__ import annotations
 
@@ -23,10 +27,7 @@ def main() -> None:
         from dimos.agents.mcp.mcp_server import McpServer
         from dimos.core.coordination.blueprints import autoconnect
         from dimos.core.coordination.module_coordinator import ModuleCoordinator
-        from dimos.core.global_config import global_config
-        from dimos.robot.unitree.go2.blueprints.smart.unitree_go2_spatial import (
-            unitree_go2_spatial,
-        )
+        from dimos.robot.unitree.go2.blueprints.smart.unitree_go2 import unitree_go2
         from dimos.robot.unitree.go2.blueprints.smart._with_jpeg import _with_jpeglcm
         from dimos.agents.skills.navigation import NavigationSkillContainer
         from dimos.agents.skills.person_follow import PersonFollowSkillContainer
@@ -41,21 +42,25 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ── git-lfs preflight ────────────────────────────────────────────────
+    # ── git-lfs preflight ───────────────────────────────────────────────
+    # (Even without SpatialMemory / SecurityModule the perception loop may
+    # still pull a small model — keep the check.)
     if shutil.which("git-lfs") is None:
         sys.stderr.write(
             "git-lfs not found on PATH.\n"
-            "dimos fetches model weights (CLIP, YOLO) via git-lfs on first launch.\n"
-            "Install:\n"
-            "  macOS:    brew install git-lfs && git lfs install\n"
-            "  Ubuntu:   sudo apt-get install -y git-lfs && git lfs install\n",
+            "Install: `brew install git-lfs && git lfs install` (macOS) /\n"
+            "         `sudo apt-get install -y git-lfs && git lfs install` (Ubuntu)\n",
         )
         sys.exit(1)
 
-    # ── sim vs real-hardware switching ───────────────────────────────────
+    # ── sim vs real-hardware switching ──────────────────────────────────
+    # `simulation` and `robot_ip` must be passed via blueprint_args["g"]
+    # so they reach the worker subprocesses (a main-process
+    # global_config.update() doesn't propagate).
     sim = os.environ.get("OV_SIM", "").lower() in ("1", "true", "yes")
+    g_overrides: dict = {}
     if sim:
-        global_config.update(simulation=True)
+        g_overrides["simulation"] = True
         sys.stderr.write("[blueprint] OV_SIM=1 → MujocoConnection\n")
     else:
         robot_ip = os.environ.get("ROBOT_IP")
@@ -65,7 +70,7 @@ def main() -> None:
                 "fail without it. Set ROBOT_IP=<your Go2 IP> or run `make sim`.\n",
             )
             sys.exit(1)
-        global_config.update(robot_ip=robot_ip)
+        g_overrides["robot_ip"] = robot_ip
 
     from overwatch_patrol.clip_recorder import ClipRecorderModule
     from overwatch_patrol.query_module import SurveillanceQueryModule
@@ -76,7 +81,7 @@ def main() -> None:
 
     go2_overwatch = autoconnect(
         _with_jpeglcm,
-        unitree_go2_spatial,
+        unitree_go2,
         SurveillanceModule.blueprint(camera_info=GO2Connection.camera_info_static),
         ClipRecorderModule.blueprint(output_dir=clip_dir),
         SurveillanceQueryModule.blueprint(sqlite_path=sqlite_path),
@@ -88,7 +93,7 @@ def main() -> None:
         McpClient.blueprint(),
     )
 
-    coordinator = ModuleCoordinator.build(go2_overwatch)
+    coordinator = ModuleCoordinator.build(go2_overwatch, {"g": g_overrides})
     coordinator.start_rpyc_service()
     coordinator.loop()
 
