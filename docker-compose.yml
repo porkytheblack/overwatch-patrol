@@ -12,7 +12,9 @@ services:
     restart: unless-stopped
 
   ov-api:
-    build: ./services/ov-api
+    build:
+      context: .
+      dockerfile: services/ov-api/Dockerfile
     depends_on: [ov-bridge]
     volumes:
       - ./data:/data
@@ -32,7 +34,9 @@ services:
     restart: unless-stopped
 
   ov-telegram:
-    build: ./services/ov-telegram
+    build:
+      context: .
+      dockerfile: services/ov-telegram/Dockerfile
     depends_on: [ov-bridge, ov-api]
     volumes:
       - ./data:/data
@@ -55,7 +59,9 @@ services:
     restart: unless-stopped
 
   ov-dashboard:
-    build: ./services/ov-dashboard
+    build:
+      context: .
+      dockerfile: services/ov-dashboard/Dockerfile
     depends_on: [ov-api]
     ports:
       - "${DASHBOARD_PORT:-3001}:3000"

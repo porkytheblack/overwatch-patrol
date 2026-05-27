@@ -1,0 +1,50 @@
+**/node_modules
+**/.next
+**/.turbo
+**/dist
+**/build
+**/out
+**/.cache
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+
+# host data + clips
+data
+logs
+
+# git + editor
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+
+# env (keep .env.example so containers can show defaults if needed)
+.env
+.env.local
+.env.*.local
+
+# tests + ci that aren't needed at runtime
+**/__tests__
+**/*.test.ts
+**/*.spec.ts
+**/tests
+**/test_*.py
+
+# docs / spec — not needed in containers
+spec.md
+btw.md
+README.md
+docs
+
+# the dev-only Dockerfiles
+**/Dockerfile.dev
+
+# vendor (would only be a stale submodule checkout from before)
+vendor
