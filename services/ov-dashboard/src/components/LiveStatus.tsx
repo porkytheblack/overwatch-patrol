@@ -27,6 +27,31 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
   });
   const lastEvt = useRef(Date.now());
 
+  // Bootstrap from the robot's MCP server. The SurveillanceModule only
+  // publishes `robot.state_changed` on transitions, so a freshly-loaded
+  // dashboard would stay at "OFFLINE" until the next transition even
+  // when the robot is happily IDLE and streaming video. One eager fetch
+  // closes that gap.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/surveillance/state', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body: { state?: string } | null) => {
+        if (cancelled || !body?.state) return;
+        setStatus((s) => ({
+          ...s,
+          online: true,
+          state: body.state as RobotState,
+          last_event_at: new Date().toISOString(),
+        }));
+        lastEvt.current = Date.now();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let stopped = false;
     const connect = () => {
@@ -47,7 +72,15 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
               current_waypoint_id: evt.waypoint_id ?? null,
             }));
           } else {
-            setStatus((s) => ({ ...s, online: true, last_event_at: new Date().toISOString() }));
+            setStatus((s) => ({
+              ...s,
+              online: true,
+              // Any LCM activity means the robot is up; if the explicit
+              // state machine hasn't told us otherwise yet, IDLE is the
+              // honest default (spec §8) rather than OFFLINE.
+              state: s.state === 'OFFLINE' ? 'IDLE' : s.state,
+              last_event_at: new Date().toISOString(),
+            }));
           }
         } catch {
           /* ignore */

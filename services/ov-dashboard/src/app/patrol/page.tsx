@@ -3,6 +3,8 @@ import { apiFetch } from '@/lib/api';
 import { redirect } from 'next/navigation';
 import { PatrolEditor } from './PatrolEditor';
 import { PatrolControls } from './PatrolControls';
+import { ManualDrive } from './ManualDrive';
+import { AddWaypoint } from './AddWaypoint';
 import { WaypointMap } from '@/components/WaypointMap';
 
 interface Waypoint {
@@ -35,6 +37,10 @@ export default async function Page() {
     <Shell>
       <div className="p-4 max-w-6xl space-y-4">
         <PatrolControls />
+      </div>
+      <div className="px-4 max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ManualDrive />
+        <AddWaypoint />
       </div>
       <div className="p-4 max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div>

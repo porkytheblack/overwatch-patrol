@@ -69,15 +69,8 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
         <div className="card mono text-sm space-y-2">
           <div className="text-text">no waypoints yet</div>
           <div className="text-text-dim text-xs">
-            drive the robot to a position you want patrolled, then add a waypoint by
-            messaging the Telegram bot:{' '}
-            <code className="mono text-text">add_waypoint front_gate</code>
-            <br />
-            (set the bot token in{' '}
-            <a href="/settings" className="text-accent">
-              settings
-            </a>{' '}
-            first)
+            use MANUAL DRIVE above to position the robot, then name it with ADD WAYPOINT.
+            Once you have 1+ waypoints, press START PATROL to begin cycling.
           </div>
         </div>
       )}

@@ -8,6 +8,8 @@
  * browser means no MCP creds or URLs leak to the client.
  */
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
 import { newId } from '@overwatch/shared-ts';
 import { ENV } from '../env.js';
 import { requireAuth } from '../middleware.js';
@@ -69,6 +71,47 @@ app.post('/start', requireAuth, (c) => handleAction(c, 'start_surveillance'));
 app.post('/stop', requireAuth, (c) => handleAction(c, 'stop_surveillance'));
 app.post('/pause', requireAuth, (c) => handleAction(c, 'pause_patrol'));
 app.post('/resume', requireAuth, (c) => handleAction(c, 'resume_patrol'));
+
+const MoveBody = z.object({
+  forward: z.number().min(-2).max(2).default(0),
+  left: z.number().min(-2).max(2).default(0),
+  degrees: z.number().min(-360).max(360).default(0),
+});
+
+/** Manual drive — small relative_move steps so click-spam stays safe. */
+app.post('/move', requireAuth, zValidator('json', MoveBody), async (c) => {
+  const args = c.req.valid('json');
+  const r = await callMcp('relative_move', args);
+  if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
+  return c.json({ ok: true, message: r.text });
+});
+
+app.post('/halt', requireAuth, async (c) => {
+  const r = await callMcp('stop_navigation');
+  if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
+  return c.json({ ok: true, message: r.text });
+});
+
+const AddWaypointBody = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9 _-]+$/, 'letters, digits, space, _ or - only'),
+});
+
+/** Captures current odom pose into dimos SpatialMemory + ov-bridge SQLite. */
+app.post(
+  '/waypoints',
+  requireAuth,
+  zValidator('json', AddWaypointBody),
+  async (c) => {
+    const { name } = c.req.valid('json');
+    const r = await callMcp('add_waypoint', { name });
+    if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
+    return c.json({ ok: true, message: r.text });
+  },
+);
 
 app.get('/state', requireAuth, async (c) => {
   const r = await callMcp('get_robot_state');
