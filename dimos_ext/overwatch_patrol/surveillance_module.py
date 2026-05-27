@@ -198,6 +198,18 @@ class SurveillanceModule(Module):
     async def main(self) -> AsyncGenerator[None, None]:
         self._goal_reached_event = asyncio.Event()
         self._supervisor_task = asyncio.create_task(self._patrol_supervisor())
+        # Surface dependency wiring so silent autoconnect failures
+        # show up in the sim console rather than during the first
+        # start_surveillance attempt.
+        planner_attached = False
+        try:
+            planner_attached = self._planner_spec is not None
+        except Exception:  # noqa: BLE001
+            planner_attached = False
+        log.info(
+            "surveillance.main_started",
+            planner_attached=planner_attached,
+        )
         yield
         # Teardown: cancel supervisor + any in-flight goal.
         if self._supervisor_task is not None and not self._supervisor_task.done():
@@ -258,9 +270,23 @@ class SurveillanceModule(Module):
     async def _patrol_leg_runner(self) -> None:
         """Cycle waypoints in order while state stays PATROLLING.
 
+        Goal handoff uses two paths defensively:
+          1. `_planner_spec.set_goal(pose)` — the synchronous RPC.
+             Always works when the planner module is composed (dimos
+             auto-injects the Spec field), independent of stream
+             transport wiring.
+          2. `self.goal_request.publish(goal)` — the in-process stream,
+             same path PatrollingModule uses. Tried opportunistically.
+
+        Arrival uses two paths defensively too:
+          1. `handle_goal_reached` setting `_goal_reached_event` — the
+             stream-based path.
+          2. Polling `_planner_spec.is_goal_reached()` — catches the
+             case where the stream isn't actually delivering.
+
         Cancellation: the supervisor cancels this when state leaves
-        PATROLLING. The in-flight `wait_for` raises, we re-raise so
-        cleanup happens in the supervisor.
+        PATROLLING. The in-flight wait raises, we re-raise so cleanup
+        happens in the supervisor.
         """
         while self.core.ctx.state == State.PATROLLING:
             waypoints = list(self.core.waypoints)
@@ -278,27 +304,74 @@ class SurveillanceModule(Module):
                 name=wp.name,
                 goal=(round(wp.pose_x, 2), round(wp.pose_y, 2)),
             )
+
             assert self._goal_reached_event is not None
             self._goal_reached_event.clear()
-            self.goal_request.publish(goal)
 
+            # Set the goal via the spec RPC. This is the path that
+            # works reliably across dimos's worker boundaries.
+            set_ok = False
             try:
-                await asyncio.wait_for(
-                    self._goal_reached_event.wait(),
-                    timeout=self.PER_LEG_TIMEOUT_S,
-                )
+                set_ok = bool(self._planner_spec.set_goal(goal))
+                log.info("surveillance.set_goal_ok", accepted=set_ok)
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.set_goal_fail", error=str(e))
+
+            # Best-effort stream publish too — matches PatrollingModule's
+            # pattern in case the spec call routes oddly.
+            try:
+                self.goal_request.publish(goal)
+            except Exception as e:  # noqa: BLE001
+                log.debug("surveillance.goal_publish_skip", error=str(e))
+
+            if not set_ok:
+                # Planner didn't accept the goal — log + skip rather
+                # than spin on an impossible target.
+                log.warning("surveillance.goal_rejected", waypoint=wp.name)
+                self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
+                await asyncio.sleep(0.5)
+                continue
+
+            arrived = await self._await_arrival()
+            if arrived:
                 log.info("surveillance.patrol_arrived", waypoint=wp.name)
                 await asyncio.sleep(self.DWELL_AT_WAYPOINT_S)
-            except asyncio.TimeoutError:
+            else:
                 log.warning("surveillance.patrol_timeout", waypoint=wp.name)
                 try:
                     self._planner_spec.cancel_goal()
                 except Exception:  # noqa: BLE001
                     pass
 
-            # Only advance when we successfully arrived OR timed out
-            # (avoids livelocking on a stuck waypoint forever).
+            # Advance whether we arrived or timed out (avoids livelocking
+            # on a permanently unreachable waypoint).
             self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
+
+    async def _await_arrival(self) -> bool:
+        """Wait up to PER_LEG_TIMEOUT_S for the planner to arrive.
+
+        Returns True on arrival, False on timeout. Watches both the
+        goal_reached stream and the spec's is_goal_reached poll so we
+        succeed even if one of them isn't actually delivering.
+        """
+        assert self._goal_reached_event is not None
+        deadline = asyncio.get_event_loop().time() + self.PER_LEG_TIMEOUT_S
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    self._goal_reached_event.wait(), timeout=min(0.5, remaining),
+                )
+                return True
+            except asyncio.TimeoutError:
+                # Stream hasn't fired yet; check the spec as a fallback.
+                try:
+                    if self._planner_spec.is_goal_reached():
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _publish_event(self, topic: str, payload: dict) -> None:
         log.debug("surveillance.event", topic=topic, type=payload.get("type"))
