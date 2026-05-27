@@ -38,14 +38,22 @@ from dimos_lcm.std_msgs import Bool
 # dashboard's SportPanel labels and the Telegram bot's
 # `execute_sport_command(command_name=…)` argument verbatim.
 _SPORT_COMMANDS: dict[str, int] = {
+    "Damp": 1001,
     "BalanceStand": 1002,
+    "StopMove": 1003,
     "StandUp": 1004,
-    "RecoveryStand": 1006,
     "StandDown": 1005,
+    "RecoveryStand": 1006,
+    "Move": 1008,
     "Sit": 1009,
     "RiseSit": 1010,
     "Hello": 1016,
     "Stretch": 1017,
+    # SwitchJoystick is what actually enables walking via the
+    # WIRELESS_CONTROLLER channel. Without it the dog interprets stick
+    # inputs as body posture (W lifts body, S lowers). Send with
+    # parameter={"data": True}.
+    "SwitchJoystick": 1027,
     "FreeWalk": 1045,
 }
 _SPORT_MOD_TOPIC = "rt/api/sport/request"  # RTC_TOPIC["SPORT_MOD"] value
@@ -259,17 +267,34 @@ class SurveillanceModule(Module):
     # injection, which dimos resolves locally.
     # ------------------------------------------------------------------
 
-    def _fire_sport_command(self, command: str) -> bool:
-        """Send a Go2 sport command via the WebRTC channel. Returns
-        True on success — failures get logged and swallowed.
+    def _fire_sport_command(
+        self,
+        command: str,
+        parameter: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Send a Go2 sport command via the WebRTC channel.
+
+        Some commands need a `parameter` payload — most notably
+        `SwitchJoystick(data=True)` which actually enables walking via
+        WIRELESS_CONTROLLER. Without parameters, sends just the api_id.
+
+        Returns True on success — failures get logged and swallowed.
         """
         api_id = _SPORT_COMMANDS.get(command)
         if api_id is None:
             log.warning("surveillance.sport_unknown", command=command)
             return False
+        request: dict[str, Any] = {"api_id": api_id}
+        if parameter is not None:
+            request["parameter"] = parameter
         try:
-            self._connection.publish_request(_SPORT_MOD_TOPIC, {"api_id": api_id})
-            log.info("surveillance.sport_sent", command=command, api_id=api_id)
+            self._connection.publish_request(_SPORT_MOD_TOPIC, request)
+            log.info(
+                "surveillance.sport_sent",
+                command=command,
+                api_id=api_id,
+                parameter=parameter,
+            )
             return True
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -320,28 +345,44 @@ class SurveillanceModule(Module):
         ).start()
 
     def _start_walk_mode_primer(self) -> None:
-        """After startup, switch the dog from BalanceStand (the default
-        post-`make robot` state where the joystick adjusts body posture)
-        into FreeWalk so cmd_vel from the dashboard actually translates
-        to walking.
+        """After startup, put the Go2 into a state where the
+        WIRELESS_CONTROLLER joystick (driven by our cmd_vel pipeline)
+        actually walks the dog instead of adjusting body posture.
+
+        The full sequence comes from reading dimos's `enable_rage_mode`
+        in unitree/connection.py — the bit that makes joystick walking
+        work isn't FreeWalk, it's `SwitchJoystick(data=True)` (sport
+        api_id 1027). Without it the dog stays in posture-control mode
+        on the left stick (W lifts the body, S lowers it).
+
+        Sequence:
+          1. BalanceStand (1002) — ensures the dog is standing/active.
+          2. FreeWalk (1045) — locomotion mode (walk vs trot).
+          3. SwitchJoystick(data=True) (1027) — the actual "stick →
+             walking" toggle. THIS is the missing piece.
 
         Real-world symptom this fixes: operator presses W on the
-        dashboard, dog's body lifts up but the legs don't step. That's
-        the BalanceStand "posture" interpretation. FreeWalk swaps it to
-        "translate forward / strafe / yaw" interpretation.
+        dashboard, robot's body lifts up but legs don't step.
         """
         import threading
         import time
 
         def _run() -> None:
-            # Wait for the WebRTC connection to be solid. dimos's own
-            # init does StandUp + BalanceStand at ~T+3s; we want to be
-            # comfortably after that.
+            # Wait for dimos's own init to settle. GO2Connection.start
+            # does StandUp + BalanceStand at ~T+3s; we want to be
+            # comfortably after that so our sport commands don't race.
             time.sleep(8)
-            if self._fire_sport_command("FreeWalk"):
-                log.info("surveillance.walk_mode_primed")
-            else:
-                log.warning("surveillance.walk_mode_prime_failed")
+            steps = [
+                ("BalanceStand", None),
+                ("FreeWalk", None),
+                ("SwitchJoystick", {"data": True}),
+            ]
+            for cmd, param in steps:
+                if self._fire_sport_command(cmd, parameter=param):
+                    time.sleep(1.5)
+                else:
+                    log.warning("surveillance.walk_mode_step_failed", step=cmd)
+            log.info("surveillance.walk_mode_primed")
 
         threading.Thread(
             target=_run, daemon=True, name="surveillance-walk-primer",
