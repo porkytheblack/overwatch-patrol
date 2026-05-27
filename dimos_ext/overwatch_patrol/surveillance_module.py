@@ -803,12 +803,26 @@ class SurveillanceModule(Module):
             def norm_angle(a: float) -> float:
                 return (a + math.pi) % (2 * math.pi) - math.pi
 
-            ARRIVAL_RADIUS_M = 0.4
-            DWELL_S = 1.0
+            # Indoor patrol tuning. The Go2 won't engage walking gait
+            # below ~0.5 stick magnitude — so LINEAR_FLOOR is the
+            # minimum we send even on short straights / final approach
+            # so the dog doesn't stall in deadzone. LINEAR_CRUISE is
+            # the normal patrol speed: noticeably slower than manual
+            # WASD (1.0) because patrol is meant to be deliberate.
+            #
+            # ANGULAR_GAIN/MAX/MIN follow the same idea — the dog has
+            # a rotation deadzone too. Smaller indoor angular ceiling
+            # so it doesn't whip around at waypoints.
+            ARRIVAL_RADIUS_M = 0.5
+            DWELL_S = 1.5
             TIMEOUT_S = 90.0
-            LINEAR_SPEED = 0.5
-            ANGULAR_SPEED = 0.9
-            ALIGN_TOL_RAD = 0.25
+            LINEAR_CRUISE = 0.65   # base patrol speed (stick units)
+            LINEAR_FLOOR = 0.55    # above walking deadzone, used near goal
+            ANGULAR_GAIN = 1.2     # P-gain on heading error
+            ANGULAR_MAX = 0.7      # rad/s ceiling — indoor-friendly
+            ANGULAR_MIN = 0.55     # above rotation deadzone
+            APPROACH_RADIUS_M = 1.5  # start ramping speed down inside this
+            HEADING_BLEND_RAD = 0.7  # ~40° — within this we drive+turn together
 
             log.info("surveillance.patrol_thread_alive")
             last_state = None
@@ -870,15 +884,42 @@ class SurveillanceModule(Module):
 
                     desired_yaw = math.atan2(dy, dx)
                     yaw_err = norm_angle(desired_yaw - yaw)
-                    if abs(yaw_err) > ALIGN_TOL_RAD:
-                        az = max(-ANGULAR_SPEED, min(ANGULAR_SPEED, 1.4 * yaw_err))
-                        publish_vel(0.0, 0.0, az)
-                    else:
-                        speed = min(LINEAR_SPEED, max(0.15, dist * 0.8))
-                        az = max(-0.5, min(0.5, 1.0 * yaw_err))
-                        publish_vel(speed, 0.0, az)
+                    abs_yaw_err = abs(yaw_err)
 
-                    time.sleep(0.1)
+                    # P-controller on angular velocity, clipped to a
+                    # deadzone-aware band. We avoid emitting tiny
+                    # commands that fall under the dog's rotation
+                    # deadzone and would stall the gait.
+                    az_raw = ANGULAR_GAIN * yaw_err
+                    if abs(az_raw) < 1e-2:
+                        az = 0.0
+                    else:
+                        mag = max(min(abs(az_raw), ANGULAR_MAX), ANGULAR_MIN)
+                        az = mag if yaw_err > 0 else -mag
+
+                    # Blended forward motion: cos(heading_err) ramps
+                    # the linear speed down as the heading misaligns,
+                    # giving a smooth arc instead of a snap-rotate
+                    # before forward motion. Once we're inside
+                    # HEADING_BLEND_RAD (~40°) we always drive AND turn.
+                    if abs_yaw_err > HEADING_BLEND_RAD:
+                        # Way off heading — rotate in place only.
+                        lx = 0.0
+                    else:
+                        # cos(0)=1, cos(40°)≈0.77. Multiply cruise speed by
+                        # the alignment factor for an arc-shaped path.
+                        align = math.cos(yaw_err)
+                        cruise = LINEAR_CRUISE * align
+                        # Ramp down inside the approach radius for a
+                        # gentle stop.
+                        if dist < APPROACH_RADIUS_M:
+                            cruise *= dist / APPROACH_RADIUS_M
+                        # Never go under the walking deadzone or the
+                        # dog will stall.
+                        lx = max(cruise, LINEAR_FLOOR) if cruise > 0.05 else 0.0
+
+                    publish_vel(lx, 0.0, az)
+                    time.sleep(0.05)  # 20 Hz, same as manual drive
 
                 publish_vel(0.0, 0.0, 0.0)
 

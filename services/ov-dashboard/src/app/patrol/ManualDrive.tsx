@@ -48,16 +48,15 @@ const KEY_MAP: Record<string, Dir> = {
 // over the cellular relay. 50 ms (20 Hz) gives 4 in-flight commands
 // before any timeout, matches the Unitree controller's typical rate.
 //
-// Linear/angular magnitudes match dimos's reference WebRTC rage
-// keyboard teleop (`unitree_go2_webrtc_rage_keyboard_teleop.py` →
-// `KeyboardTeleop.blueprint(linear_speed=1.25, angular_speed=1.2)`).
-// The dog has a deadzone on joystick walking; anything below ~0.5 m/s
-// won't engage the gait. 0.4 m/s (our previous value) was inside that
-// deadzone, hence the dog stayed stationary even with rage mode on.
+// LINEAR_SPEED is tuned for INDOOR demo use. The Go2's joystick has
+// a walking deadzone below ~0.5; we stay just above that for normal
+// drive (gentle pace) and use SPRINT_MULT only when the operator
+// holds Shift. dimos's reference teleop uses 1.25 / 1.2 — that's an
+// open-area value, too fast for a conference floor or office.
 const TICK_MS = 50;
-const LINEAR_SPEED = 1.0; // m/s
-const ANGULAR_SPEED = 1.0; // rad/s
-const SPRINT_MULT = 1.25;
+const LINEAR_SPEED = 0.6; // m/s — base indoor walk
+const ANGULAR_SPEED = 0.7; // rad/s — gentle indoor turn
+const SPRINT_MULT = 1.6; // hold Shift to bump to ~0.96 / 1.12
 
 export function ManualDrive() {
   const { online } = useLiveStatus();
