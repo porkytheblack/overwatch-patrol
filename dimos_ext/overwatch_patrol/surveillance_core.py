@@ -266,7 +266,11 @@ class SurveillanceCore:
             pose_x=x,
             pose_y=y,
             pose_yaw=yaw,
-            targets=[],
+            # Default to person detection so the demo flow ("add 3
+            # waypoints → press START PATROL → walk in front of the
+            # robot → get an incident") works out of the box. Operator
+            # can override per-waypoint via the dashboard.
+            targets=["person"],
         )
         self.waypoints.append(wp)
         self.spatial_memory_upsert(wp)

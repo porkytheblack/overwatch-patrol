@@ -51,3 +51,9 @@ station-logs.jsonl
 
 # generated (events.py is regenerated from packages/schemas)
 dimos_ext/overwatch_patrol/events.py.bak
+
+# YOLO weights — auto-downloaded by ultralytics on first surveillance launch.
+# ~6 MB binary, no point committing.
+yolov8n.pt
+*.pt
+MUJOCO_LOG.TXT

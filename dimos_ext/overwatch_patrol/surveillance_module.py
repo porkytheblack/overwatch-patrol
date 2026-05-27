@@ -133,6 +133,183 @@ class SurveillanceModule(Module):
         self._load_waypoints_from_sqlite()
         self._start_odom_listener()
         self._start_cmd_vel_patrol_thread()
+        self._start_detector_thread()
+
+    # ------------------------------------------------------------------
+    # Detector
+    # ------------------------------------------------------------------
+
+    DETECTOR_ACTIVE_RADIUS_M = 2.5
+
+    def _active_waypoint(self) -> Optional["WaypointSpec"]:
+        """Return the waypoint detections should be attributed to.
+
+        Spec §8 invariant: only PATROLLING and INSPECTING may open
+        incidents. Outside that, no waypoint is "active" and the
+        detector still publishes frames but skips incident gating.
+
+        The active waypoint is the nearest one within
+        DETECTOR_ACTIVE_RADIUS_M of the current pose — that captures
+        both "dwelling at a waypoint" (cursor case) and "near a
+        waypoint that isn't currently the cursor" (which still ought
+        to flag intruders).
+        """
+        if self.core.ctx.state not in (State.PATROLLING, State.INSPECTING):
+            return None
+        if not self.core.waypoints:
+            return None
+        x, y, _ = self._pose
+        best = None
+        best_d2 = self.DETECTOR_ACTIVE_RADIUS_M ** 2
+        for w in self.core.waypoints:
+            d2 = (w.pose_x - x) ** 2 + (w.pose_y - y) ** 2
+            if d2 < best_d2:
+                best, best_d2 = w, d2
+        return best
+
+    def _start_detector_thread(self) -> None:
+        """Run YOLO at `config.detector_period_s` on /color_image frames.
+
+        Output detections feed `core.on_detections(ts, waypoint, ...)`,
+        which handles the linger tracker + incident open / suppress
+        logic that already exists in SurveillanceCore. Detections only
+        run when an active waypoint resolves; otherwise we burn no
+        cycles on a YOLO pass that nothing would consume.
+        """
+        import threading
+
+        def _run() -> None:
+            import time
+
+            try:
+                import lcm  # type: ignore
+                import numpy as np  # type: ignore
+                import cv2  # type: ignore
+                from dimos_lcm.sensor_msgs.Image import Image as LCMImage  # type: ignore
+                from ultralytics import YOLO  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.detector_imports_failed", error=str(e))
+                return
+
+            # Cache the latest JPEG frame from a dedicated LCM client +
+            # pump thread, decoupled from any other subscribers in
+            # this process.
+            latest_jpeg: dict[str, Optional[bytes]] = {"data": None}
+
+            def _img_handler(_ch: str, data: bytes) -> None:
+                try:
+                    msg = LCMImage.lcm_decode(data)
+                    if getattr(msg, "encoding", "") == "jpeg":
+                        latest_jpeg["data"] = bytes(msg.data[: msg.data_length])
+                except Exception:  # noqa: BLE001
+                    pass
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+            lc.subscribe(r"^/color_image(#.*)?$", _img_handler)
+            log.info("surveillance.detector_lcm_subscribed")
+
+            def _pump() -> None:
+                while True:
+                    try:
+                        lc.handle_timeout(200)
+                    except Exception:  # noqa: BLE001
+                        return
+
+            threading.Thread(target=_pump, daemon=True, name="surveillance-detector-lcm").start()
+
+            # Load YOLO. First run downloads yolov8n.pt (~6MB).
+            log.info("surveillance.yolo_loading")
+            try:
+                model = YOLO("yolov8n.pt")
+            except Exception as e:  # noqa: BLE001
+                log.error("surveillance.yolo_load_fail", error=str(e))
+                return
+            log.info("surveillance.yolo_ready", classes=len(model.names))
+
+            period = max(0.05, float(self.config.detector_period_s))
+            ticks = 0
+            while True:
+                time.sleep(period)
+                ticks += 1
+                jpeg = latest_jpeg["data"]
+                if jpeg is None:
+                    if ticks in (10, 100):
+                        log.info("surveillance.detector_waiting_for_frame", ticks=ticks)
+                    continue
+
+                wp = self._active_waypoint()
+                if wp is None:
+                    continue  # nothing to attribute detections to
+
+                try:
+                    arr = cv2.imdecode(
+                        np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR,
+                    )
+                    if arr is None:
+                        continue
+                    # `track` keeps stable IDs across frames so the
+                    # linger tracker can accumulate per-target time.
+                    # classes=[0] = COCO "person" — cheap filter that
+                    # skips bbox extraction for everything else.
+                    results = model.track(
+                        arr, persist=True, classes=[0], verbose=False,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.yolo_inference_fail", error=str(e))
+                    continue
+
+                detections: list[dict[str, Any]] = []
+                for r in results:
+                    boxes = getattr(r, "boxes", None)
+                    if boxes is None:
+                        continue
+                    for box in boxes:
+                        try:
+                            xywh = box.xywh[0].tolist()
+                            conf = float(box.conf[0])
+                            cls_id = int(box.cls[0])
+                            track_id_raw = getattr(box, "id", None)
+                            track_id = (
+                                f"t{int(track_id_raw[0])}"
+                                if track_id_raw is not None
+                                else None
+                            )
+                        except Exception:  # noqa: BLE001
+                            continue
+                        cx, cy, w_, h_ = xywh
+                        detections.append(
+                            {
+                                "class": model.names.get(cls_id, str(cls_id)),
+                                "confidence": conf,
+                                # Spec §6 bbox is top-left + w + h.
+                                "bbox": {
+                                    "x": float(cx - w_ / 2),
+                                    "y": float(cy - h_ / 2),
+                                    "w": float(w_),
+                                    "h": float(h_),
+                                },
+                                "track_id": track_id,
+                            },
+                        )
+
+                if detections:
+                    log.info(
+                        "surveillance.detections",
+                        n=len(detections),
+                        waypoint=wp.name,
+                        track_ids=[d.get("track_id") for d in detections],
+                    )
+                ts = time.time()
+                try:
+                    self.core.on_detections(ts, wp, detections)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.on_detections_fail", error=str(e))
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-detector",
+        ).start()
 
     def _load_waypoints_from_sqlite(self) -> None:
         sqlite_path = os.environ.get("SQLITE_PATH") or ""
@@ -163,6 +340,11 @@ class SurveillanceModule(Module):
                 targets = json.loads(r[5]) if r[5] else []
             except Exception:  # noqa: BLE001
                 targets = []
+            # Bring legacy rows (stored with targets='[]' by older
+            # bridge versions) up to the current default so the demo
+            # works without per-waypoint editing.
+            if not targets:
+                targets = ["person"]
             loaded.append(
                 WaypointSpec(
                     id=str(r[0]),

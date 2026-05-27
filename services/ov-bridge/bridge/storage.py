@@ -169,7 +169,7 @@ class Storage:
                   id, name, pose_x, pose_y, pose_yaw, scene_description, targets,
                   detection_window, linger_threshold_seconds, inspection_dwell_seconds,
                   min_standoff_m, order_index, enabled, created_at
-                ) VALUES (?, ?, ?, ?, ?, '', '[]', '{"type":"always"}', 5, 4, 1.5,
+                ) VALUES (?, ?, ?, ?, ?, '', '["person"]', '{"type":"always"}', 5, 4, 1.5,
                          COALESCE((SELECT MAX(order_index)+1 FROM waypoints), 0), 1,
                          strftime('%Y-%m-%dT%H:%M:%fZ','now'))
                 ON CONFLICT(id) DO UPDATE SET
