@@ -13,6 +13,13 @@ const repoRoot = resolve(__dirname, '..', '..', '..');
 const dotenvPath = join(repoRoot, '.env');
 if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
 
+// Compose env vars unset on the host come through as empty strings via
+// `${VAR:-}`. zod's `.optional()` only accepts `undefined`, so normalize.
+const stripped: Record<string, string | undefined> = {};
+for (const [k, v] of Object.entries(process.env)) {
+  stripped[k] = v === '' ? undefined : v;
+}
+
 /**
  * Resolve SQLITE_PATH to something the current process can actually write.
  *
@@ -68,7 +75,7 @@ const env = z
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     DATA_DIR: z.string().default('/data'),
   })
-  .parse(process.env);
+  .parse(stripped);
 
 export const ENV = {
   ...env,
