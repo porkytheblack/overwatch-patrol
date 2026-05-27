@@ -17,7 +17,11 @@ const List = z.object({
   status: z.enum(['open', 'closed', 'suppressed', 'acknowledged', 'all']).default('all'),
   waypoint_id: z.string().optional(),
   cursor: z.string().optional(),
-  limit: z.coerce.number().int().positive().max(200).default(50),
+  // Calendar view loads a full month of incident metadata in one shot
+  // (spec §10.4: 1000 incidents / month in <500ms). 5000 leaves
+  // operator-defined retention some headroom; smaller default still
+  // protects /incidents pagination.
+  limit: z.coerce.number().int().positive().max(5000).default(50),
 });
 
 app.get('/', requireAuth, zValidator('query', List), (c) => {
