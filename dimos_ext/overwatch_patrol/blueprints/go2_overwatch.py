@@ -73,6 +73,7 @@ def main() -> None:
         g_overrides["robot_ip"] = robot_ip
 
     from overwatch_patrol.clip_recorder import ClipRecorderModule
+    from overwatch_patrol.local_speak_skill import LocalSpeakSkill
     from overwatch_patrol.query_module import SurveillanceQueryModule
     from overwatch_patrol.spatial_memory_stub import SpatialMemoryStub
     from overwatch_patrol.surveillance_module import SurveillanceModule
@@ -80,15 +81,16 @@ def main() -> None:
     sqlite_path = os.environ.get("SQLITE_PATH", "/data/overwatch.db")
     clip_dir = os.environ.get("CLIP_DIR", "/data/clips")
 
-    # SpeakSkill uses OpenAI TTS and crashes on start() without OPENAI_API_KEY.
-    # The v1 demo doesn't need spoken robot output (the Telegram bot is the
-    # voice), so make it opt-in: include only when the key is present.
-    optional_modules: list = []
+    # TTS selection — agent always gets a `speak(...)` tool:
+    #   OPENAI_API_KEY set → dimos SpeakSkill (cloud, high-quality voice)
+    #   otherwise          → LocalSpeakSkill (offline, OS native TTS)
     if os.environ.get("OPENAI_API_KEY"):
-        optional_modules.append(SpeakSkill.blueprint())
+        speak_blueprint = SpeakSkill.blueprint()
+        sys.stderr.write("[blueprint] OPENAI_API_KEY set → SpeakSkill (OpenAI TTS).\n")
     else:
+        speak_blueprint = LocalSpeakSkill.blueprint()
         sys.stderr.write(
-            "[blueprint] OPENAI_API_KEY unset → skipping SpeakSkill (robot voice disabled).\n",
+            "[blueprint] OPENAI_API_KEY unset → LocalSpeakSkill (offline OS TTS).\n",
         )
 
     go2_overwatch = autoconnect(
@@ -104,7 +106,7 @@ def main() -> None:
         NavigationSkillContainer.blueprint(),
         PersonFollowSkillContainer.blueprint(camera_info=GO2Connection.camera_info_static),
         UnitreeSkillContainer.blueprint(),
-        *optional_modules,
+        speak_blueprint,
         McpServer.blueprint(),
         McpClient.blueprint(),
     )
