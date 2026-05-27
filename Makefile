@@ -1,4 +1,4 @@
-.PHONY: setup setup-sim ensure-env robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos
+.PHONY: setup setup-sim ensure-env check-git-lfs robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos
 
 SVC ?=
 
@@ -34,7 +34,17 @@ ensure-env:
 
 # ---- Python ---------------------------------------------------------------
 
-setup: ensure-env
+# dimos's SpatialMemory + SecurityModule fetch CLIP / YOLO weights via
+# git-lfs on first launch. Fail fast if it isn't on PATH.
+check-git-lfs:
+	@if ! command -v git-lfs >/dev/null 2>&1; then \
+		echo "✗ git-lfs not found on PATH (required by dimos for model weights)."; \
+		echo "  macOS:  brew install git-lfs && git lfs install"; \
+		echo "  Ubuntu: sudo apt-get install -y git-lfs && git lfs install"; \
+		exit 1; \
+	fi
+
+setup: ensure-env check-git-lfs
 	@echo "▸ creating uv venv (Python 3.12)"
 	@uv venv --python "3.12" || true
 	@echo "▸ installing dimos[base,unitree] from PyPI"
@@ -51,7 +61,7 @@ setup: ensure-env
 	pnpm -F @overwatch/api migrate
 	@echo "✓ setup complete"
 
-setup-sim: ensure-env
+setup-sim: ensure-env check-git-lfs
 	@echo "▸ creating uv venv (Python 3.12)"
 	@uv venv --python "3.12" || true
 	@echo "▸ installing dimos[base,unitree,sim] (Mujoco backend)"
