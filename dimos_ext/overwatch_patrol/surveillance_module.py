@@ -59,6 +59,7 @@ class SurveillanceModule(Module):
         # than the (0, 0, 0) default.
         self._pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._odom_thread: Optional[Any] = None
+        self._patrol_thread: Optional[Any] = None
         self.core = SurveillanceCore(
             config=SurveillanceCoreConfig(
                 detector_period_s=self.config.detector_period_s,
@@ -71,6 +72,7 @@ class SurveillanceModule(Module):
             current_pose=lambda: self._pose,
         )
         self._start_odom_listener()
+        self._start_patrol_loop()
 
     # ------------------------------------------------------------------
     # Event publishing.
@@ -156,6 +158,139 @@ class SurveillanceModule(Module):
             target=_run, daemon=True, name="surveillance-odom",
         )
         self._odom_thread.start()
+
+    def _start_patrol_loop(self) -> None:
+        """Drive the robot through `core.waypoints` while state == PATROLLING.
+
+        Pure go-to-goal controller on top of cmd_vel: turn toward the
+        next waypoint until aligned, then drive forward until within
+        `ARRIVAL_RADIUS_M`. Repeats for each waypoint in order, wrapping
+        on the cursor stored in `core.ctx.cursor_index` (so pause/resume
+        from §8 works without losing place).
+
+        We bypass dimos's PatrollingModule / planner here so v1 ships a
+        moving robot without depending on the full nav stack. Replace
+        with set_goal() against the ReplanningAStarPlanner once we want
+        true obstacle-aware patrolling (spec §7.2 follow-up).
+        """
+        import threading
+        import time
+        import math
+
+        ARRIVAL_RADIUS_M = 0.35
+        DWELL_S = 1.0
+        TIMEOUT_S = 60.0
+        TICK_HZ = 10
+        LINEAR_SPEED = 0.4
+        ANGULAR_SPEED = 0.8
+        ALIGN_TOL_RAD = 0.25  # ~14°
+        # cmd_vel timeout on the Go2 is 200ms; we tick at 100ms so the
+        # robot doesn't repeatedly trigger its own watchdog mid-motion.
+
+        def _norm_angle(a: float) -> float:
+            """Wrap to (-π, π]."""
+            return (a + math.pi) % (2 * math.pi) - math.pi
+
+        def _run() -> None:
+            try:
+                import lcm  # type: ignore
+                from dimos_lcm.geometry_msgs.Twist import Twist  # type: ignore
+                from dimos_lcm.geometry_msgs.Vector3 import Vector3  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.patrol_lcm_unavailable", error=str(e))
+                return
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+
+            def publish_vel(lx: float, ly: float, az: float) -> None:
+                t = Twist()
+                t.linear = Vector3()
+                t.linear.x = float(lx)
+                t.linear.y = float(ly)
+                t.linear.z = 0.0
+                t.angular = Vector3()
+                t.angular.x = 0.0
+                t.angular.y = 0.0
+                t.angular.z = float(az)
+                lc.publish("/cmd_vel#geometry_msgs.Twist", t.lcm_encode())
+
+            last_state = None
+            while True:
+                from .state_machine import State
+
+                ctx = self.core.ctx
+                state = ctx.state
+                if state != last_state:
+                    log.info("surveillance.patrol_state", state=state.value)
+                    last_state = state
+
+                if state != State.PATROLLING:
+                    time.sleep(0.2)
+                    continue
+
+                waypoints = list(self.core.waypoints)
+                if not waypoints:
+                    time.sleep(0.5)
+                    continue
+
+                cursor = ctx.cursor_index % len(waypoints)
+                wp = waypoints[cursor]
+                log.info(
+                    "surveillance.patrol_goto",
+                    index=cursor,
+                    name=wp.name,
+                    goal=(round(wp.pose_x, 2), round(wp.pose_y, 2)),
+                )
+
+                start_t = time.time()
+                arrived = False
+                while self.core.ctx.state == State.PATROLLING:
+                    if time.time() - start_t > TIMEOUT_S:
+                        log.warning(
+                            "surveillance.patrol_timeout",
+                            waypoint=wp.name,
+                        )
+                        break
+
+                    x, y, yaw = self._pose
+                    dx = wp.pose_x - x
+                    dy = wp.pose_y - y
+                    dist = math.hypot(dx, dy)
+                    if dist < ARRIVAL_RADIUS_M:
+                        arrived = True
+                        break
+
+                    desired_yaw = math.atan2(dy, dx)
+                    yaw_err = _norm_angle(desired_yaw - yaw)
+
+                    if abs(yaw_err) > ALIGN_TOL_RAD:
+                        # rotate in place
+                        az = max(-ANGULAR_SPEED, min(ANGULAR_SPEED, 1.5 * yaw_err))
+                        publish_vel(0.0, 0.0, az)
+                    else:
+                        # slow as we approach so we don't overshoot
+                        speed = min(LINEAR_SPEED, max(0.1, dist * 0.8))
+                        # gentle yaw correction while driving
+                        az = max(-0.4, min(0.4, 1.0 * yaw_err))
+                        publish_vel(speed, 0.0, az)
+
+                    time.sleep(1.0 / TICK_HZ)
+
+                # Stop and dwell briefly so the operator can see where
+                # the robot landed. Robot's own watchdog also handles it.
+                publish_vel(0.0, 0.0, 0.0)
+
+                if arrived and self.core.ctx.state == State.PATROLLING:
+                    log.info("surveillance.patrol_arrived", waypoint=wp.name)
+                    time.sleep(DWELL_S)
+                    self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
+
+        self._patrol_thread = threading.Thread(
+            target=_run, daemon=True, name="surveillance-patrol",
+        )
+        self._patrol_thread.start()
 
     def _publish_event(self, topic: str, payload: dict) -> None:
         log.debug("surveillance.event", topic=topic, type=payload.get("type"))
