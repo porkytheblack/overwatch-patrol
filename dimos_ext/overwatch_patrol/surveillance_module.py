@@ -13,8 +13,11 @@ Skills exposed (spec §7.1):
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import os
+from collections.abc import AsyncGenerator
 from typing import Any, Optional
 
 import structlog
@@ -22,7 +25,14 @@ import structlog
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.navigation.replanning_a_star.module_spec import (
+    ReplanningAStarPlannerSpec,
+)
+from dimos_lcm.std_msgs import Bool
 
+from .state_machine import State
 from .surveillance_core import (
     SurveillanceCore,
     SurveillanceCoreConfig,
@@ -52,6 +62,15 @@ class SurveillanceModule(Module):
 
     config: SurveillanceModuleConfig
 
+    # Wired by dimos autoconnect to ReplanningAStarPlanner in the
+    # unitree_go2 blueprint. `goal_request` publishes a PoseStamped on
+    # the planner's input stream; `goal_reached` is its arrival
+    # broadcast. The spec field lets us call cancel_goal / replanning
+    # toggles directly when the operator pauses or stops patrol.
+    goal_request: Out[PoseStamped]
+    goal_reached: In[Bool]
+    _planner_spec: ReplanningAStarPlannerSpec
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         # Latest (x, y, yaw) sampled from /odom; `current_pose` reads
@@ -59,7 +78,9 @@ class SurveillanceModule(Module):
         # than the (0, 0, 0) default.
         self._pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._odom_thread: Optional[Any] = None
-        self._patrol_thread: Optional[Any] = None
+        # Set in main(); used by handle_goal_reached + the patrol loop.
+        self._goal_reached_event: Optional[asyncio.Event] = None
+        self._supervisor_task: Optional[asyncio.Task[None]] = None
         self.core = SurveillanceCore(
             config=SurveillanceCoreConfig(
                 detector_period_s=self.config.detector_period_s,
@@ -72,7 +93,6 @@ class SurveillanceModule(Module):
             current_pose=lambda: self._pose,
         )
         self._start_odom_listener()
-        self._start_patrol_loop()
 
     # ------------------------------------------------------------------
     # Event publishing.
@@ -159,138 +179,126 @@ class SurveillanceModule(Module):
         )
         self._odom_thread.start()
 
-    def _start_patrol_loop(self) -> None:
-        """Drive the robot through `core.waypoints` while state == PATROLLING.
+    # ------------------------------------------------------------------
+    # Patrol loop — drives the robot through `core.waypoints` whenever
+    # state == PATROLLING by feeding goals to the ReplanningAStarPlanner.
+    #
+    # The planner does the actual driving (cmd_vel output, replanning,
+    # costmap awareness). We just publish a PoseStamped on `goal_request`
+    # and await `handle_goal_reached`. `pause_patrol` and
+    # `stop_surveillance` flip the state machine; the supervisor task
+    # observes that and cancels the in-flight leg, calling
+    # `_planner_spec.cancel_goal()` so the planner's own driver halts.
+    # ------------------------------------------------------------------
 
-        Pure go-to-goal controller on top of cmd_vel: turn toward the
-        next waypoint until aligned, then drive forward until within
-        `ARRIVAL_RADIUS_M`. Repeats for each waypoint in order, wrapping
-        on the cursor stored in `core.ctx.cursor_index` (so pause/resume
-        from §8 works without losing place).
+    DWELL_AT_WAYPOINT_S = 1.0
+    PER_LEG_TIMEOUT_S = 60.0
+    NO_WAYPOINTS_SLEEP_S = 1.0
 
-        We bypass dimos's PatrollingModule / planner here so v1 ships a
-        moving robot without depending on the full nav stack. Replace
-        with set_goal() against the ReplanningAStarPlanner once we want
-        true obstacle-aware patrolling (spec §7.2 follow-up).
-        """
-        import threading
-        import time
-        import math
-
-        ARRIVAL_RADIUS_M = 0.35
-        DWELL_S = 1.0
-        TIMEOUT_S = 60.0
-        TICK_HZ = 10
-        LINEAR_SPEED = 0.4
-        ANGULAR_SPEED = 0.8
-        ALIGN_TOL_RAD = 0.25  # ~14°
-        # cmd_vel timeout on the Go2 is 200ms; we tick at 100ms so the
-        # robot doesn't repeatedly trigger its own watchdog mid-motion.
-
-        def _norm_angle(a: float) -> float:
-            """Wrap to (-π, π]."""
-            return (a + math.pi) % (2 * math.pi) - math.pi
-
-        def _run() -> None:
+    async def main(self) -> AsyncGenerator[None, None]:
+        self._goal_reached_event = asyncio.Event()
+        self._supervisor_task = asyncio.create_task(self._patrol_supervisor())
+        yield
+        # Teardown: cancel supervisor + any in-flight goal.
+        if self._supervisor_task is not None and not self._supervisor_task.done():
+            self._supervisor_task.cancel()
             try:
-                import lcm  # type: ignore
-                from dimos_lcm.geometry_msgs.Twist import Twist  # type: ignore
-                from dimos_lcm.geometry_msgs.Vector3 import Vector3  # type: ignore
-            except Exception as e:  # noqa: BLE001
-                log.warning("surveillance.patrol_lcm_unavailable", error=str(e))
-                return
+                await self._supervisor_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            self._planner_spec.cancel_goal()
+        except Exception:  # noqa: BLE001
+            pass
 
-            lc = lcm.LCM(
-                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
-            )
+    async def handle_goal_reached(self, _msg: Bool) -> None:
+        """Planner says we arrived. Wake the current leg."""
+        if self._goal_reached_event is not None:
+            self._goal_reached_event.set()
 
-            def publish_vel(lx: float, ly: float, az: float) -> None:
-                t = Twist()
-                t.linear = Vector3()
-                t.linear.x = float(lx)
-                t.linear.y = float(ly)
-                t.linear.z = 0.0
-                t.angular = Vector3()
-                t.angular.x = 0.0
-                t.angular.y = 0.0
-                t.angular.z = float(az)
-                lc.publish("/cmd_vel#geometry_msgs.Twist", t.lcm_encode())
+    async def _patrol_supervisor(self) -> None:
+        """Spawn / cancel the leg-runner as `state` flips in/out of PATROLLING.
 
-            last_state = None
+        Single long-lived task → simple cancellation semantics. We
+        poll state at 10 Hz which is plenty: the state machine only
+        transitions on explicit operator action or a couple of
+        SurveillanceCore timeouts.
+        """
+        leg_task: Optional[asyncio.Task[None]] = None
+        last_state = None
+        try:
             while True:
-                from .state_machine import State
-
-                ctx = self.core.ctx
-                state = ctx.state
+                state = self.core.ctx.state
                 if state != last_state:
                     log.info("surveillance.patrol_state", state=state.value)
                     last_state = state
 
-                if state != State.PATROLLING:
-                    time.sleep(0.2)
-                    continue
+                if state == State.PATROLLING and (leg_task is None or leg_task.done()):
+                    leg_task = asyncio.create_task(self._patrol_leg_runner())
+                elif state != State.PATROLLING and leg_task is not None and not leg_task.done():
+                    leg_task.cancel()
+                    try:
+                        await leg_task
+                    except asyncio.CancelledError:
+                        pass
+                    leg_task = None
+                    # Make sure the planner stops driving when we leave
+                    # PATROLLING (pause / stop / inspect transition).
+                    try:
+                        self._planner_spec.cancel_goal()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("surveillance.cancel_goal_fail", error=str(e))
 
-                waypoints = list(self.core.waypoints)
-                if not waypoints:
-                    time.sleep(0.5)
-                    continue
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            if leg_task is not None and not leg_task.done():
+                leg_task.cancel()
+            raise
 
-                cursor = ctx.cursor_index % len(waypoints)
-                wp = waypoints[cursor]
-                log.info(
-                    "surveillance.patrol_goto",
-                    index=cursor,
-                    name=wp.name,
-                    goal=(round(wp.pose_x, 2), round(wp.pose_y, 2)),
+    async def _patrol_leg_runner(self) -> None:
+        """Cycle waypoints in order while state stays PATROLLING.
+
+        Cancellation: the supervisor cancels this when state leaves
+        PATROLLING. The in-flight `wait_for` raises, we re-raise so
+        cleanup happens in the supervisor.
+        """
+        while self.core.ctx.state == State.PATROLLING:
+            waypoints = list(self.core.waypoints)
+            if not waypoints:
+                await asyncio.sleep(self.NO_WAYPOINTS_SLEEP_S)
+                continue
+
+            cursor = self.core.ctx.cursor_index % len(waypoints)
+            wp = waypoints[cursor]
+            goal = _pose_stamped_from_waypoint(wp)
+
+            log.info(
+                "surveillance.patrol_goto",
+                index=cursor,
+                name=wp.name,
+                goal=(round(wp.pose_x, 2), round(wp.pose_y, 2)),
+            )
+            assert self._goal_reached_event is not None
+            self._goal_reached_event.clear()
+            self.goal_request.publish(goal)
+
+            try:
+                await asyncio.wait_for(
+                    self._goal_reached_event.wait(),
+                    timeout=self.PER_LEG_TIMEOUT_S,
                 )
+                log.info("surveillance.patrol_arrived", waypoint=wp.name)
+                await asyncio.sleep(self.DWELL_AT_WAYPOINT_S)
+            except asyncio.TimeoutError:
+                log.warning("surveillance.patrol_timeout", waypoint=wp.name)
+                try:
+                    self._planner_spec.cancel_goal()
+                except Exception:  # noqa: BLE001
+                    pass
 
-                start_t = time.time()
-                arrived = False
-                while self.core.ctx.state == State.PATROLLING:
-                    if time.time() - start_t > TIMEOUT_S:
-                        log.warning(
-                            "surveillance.patrol_timeout",
-                            waypoint=wp.name,
-                        )
-                        break
-
-                    x, y, yaw = self._pose
-                    dx = wp.pose_x - x
-                    dy = wp.pose_y - y
-                    dist = math.hypot(dx, dy)
-                    if dist < ARRIVAL_RADIUS_M:
-                        arrived = True
-                        break
-
-                    desired_yaw = math.atan2(dy, dx)
-                    yaw_err = _norm_angle(desired_yaw - yaw)
-
-                    if abs(yaw_err) > ALIGN_TOL_RAD:
-                        # rotate in place
-                        az = max(-ANGULAR_SPEED, min(ANGULAR_SPEED, 1.5 * yaw_err))
-                        publish_vel(0.0, 0.0, az)
-                    else:
-                        # slow as we approach so we don't overshoot
-                        speed = min(LINEAR_SPEED, max(0.1, dist * 0.8))
-                        # gentle yaw correction while driving
-                        az = max(-0.4, min(0.4, 1.0 * yaw_err))
-                        publish_vel(speed, 0.0, az)
-
-                    time.sleep(1.0 / TICK_HZ)
-
-                # Stop and dwell briefly so the operator can see where
-                # the robot landed. Robot's own watchdog also handles it.
-                publish_vel(0.0, 0.0, 0.0)
-
-                if arrived and self.core.ctx.state == State.PATROLLING:
-                    log.info("surveillance.patrol_arrived", waypoint=wp.name)
-                    time.sleep(DWELL_S)
-                    self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
-
-        self._patrol_thread = threading.Thread(
-            target=_run, daemon=True, name="surveillance-patrol",
-        )
-        self._patrol_thread.start()
+            # Only advance when we successfully arrived OR timed out
+            # (avoids livelocking on a stuck waypoint forever).
+            self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
 
     def _publish_event(self, topic: str, payload: dict) -> None:
         log.debug("surveillance.event", topic=topic, type=payload.get("type"))
@@ -395,3 +403,18 @@ class SurveillanceModule(Module):
     def get_robot_state(self) -> str:
         """Return current state, cursor, active incident, and pose, as JSON."""
         return self.core.get_robot_state()
+
+
+def _pose_stamped_from_waypoint(wp: WaypointSpec) -> PoseStamped:
+    """Convert our stored (x, y, yaw) waypoint into the dimos PoseStamped
+    the planner expects on its `goal_request` input.
+
+    Yaw → quaternion is Z-axis rotation only (ground robot), matching the
+    REP-103 convention used by the rest of dimos.
+    """
+    half_yaw = wp.pose_yaw / 2.0
+    return PoseStamped(
+        frame_id="map",
+        position=[wp.pose_x, wp.pose_y, 0.0],
+        orientation=[0.0, 0.0, math.sin(half_yaw), math.cos(half_yaw)],
+    )
