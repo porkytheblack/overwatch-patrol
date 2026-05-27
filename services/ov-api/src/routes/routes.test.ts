@@ -23,11 +23,10 @@ process.env.LOG_LEVEL = 'error';
 // Apply migrations
 const sqlite = new Database(dbPath);
 sqlite.pragma('foreign_keys = ON');
-const sql = readFileSync(
-  join(__dirname, '..', '..', 'migrations', '0001_init.sql'),
-  'utf8',
-);
-sqlite.exec(sql);
+for (const f of ['0001_init.sql', '0002_claim_codes.sql']) {
+  const sql = readFileSync(join(__dirname, '..', '..', 'migrations', f), 'utf8');
+  sqlite.exec(sql);
+}
 sqlite.exec(
   `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
 );
@@ -236,6 +235,112 @@ describe('subscribers', () => {
       headers: { Authorization: `Bearer ${sessionId}` },
     });
     expect(res.status).toBe(200);
+  });
+
+  it('re-creating an existing (channel, handle) row is idempotent (re-enables)', async () => {
+    // Add → delete enable flag → add again should re-enable, not 500.
+    const add = await app.request('/api/subscribers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ channel: 'telegram', handle: 'idempotent-1', enabled: true }),
+    });
+    expect(add.status).toBe(201);
+    const { id: addedId } = (await add.json()) as { id: string };
+    const again = await app.request('/api/subscribers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ channel: 'telegram', handle: 'idempotent-1', enabled: true }),
+    });
+    expect(again.status).toBe(201);
+    const { id: againId } = (await again.json()) as { id: string };
+    expect(againId).toBe(addedId);
+    // cleanup
+    await app.request(`/api/subscribers/${addedId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${sessionId}` },
+    });
+  });
+});
+
+describe('subscribers claim flow', () => {
+  // Seed a claim code via direct sqlite (mirrors what the bot's /start
+  // handler will do at runtime).
+  function seedCode(opts: {
+    code: string;
+    chat_id: string;
+    expires_at?: string;
+    claimed_at?: string | null;
+  }) {
+    const sqlite2 = new Database(dbPath);
+    sqlite2.prepare(
+      `INSERT OR REPLACE INTO claim_codes (code, chat_id, chat_handle, created_at, expires_at, claimed_at)
+       VALUES (?, ?, NULL, ?, ?, ?)`,
+    ).run(
+      opts.code,
+      opts.chat_id,
+      new Date().toISOString(),
+      opts.expires_at ?? new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      opts.claimed_at ?? null,
+    );
+    sqlite2.close();
+  }
+
+  it('claim with unknown code returns 400', async () => {
+    const res = await app.request('/api/subscribers/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ code: 'NEVERWAS' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('claim with expired code returns 410', async () => {
+    seedCode({
+      code: 'EXP000',
+      chat_id: '9001',
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    const res = await app.request('/api/subscribers/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ code: 'EXP000' }),
+    });
+    expect(res.status).toBe(410);
+  });
+
+  it('claim happy path creates a subscriber and marks the code consumed', async () => {
+    seedCode({ code: 'HAPPY1', chat_id: 'chat-42' });
+    const res = await app.request('/api/subscribers/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ code: 'HAPPY1' }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { handle: string; enabled: boolean };
+    expect(body.handle).toBe('chat-42');
+    expect(body.enabled).toBe(true);
+
+    // Second claim of the same code is rejected as already-claimed.
+    const dup = await app.request('/api/subscribers/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ code: 'HAPPY1' }),
+    });
+    expect(dup.status).toBe(409);
+  });
+
+  it('claim is idempotent for an existing chat_id (re-enables subscriber)', async () => {
+    seedCode({ code: 'REPEAT', chat_id: 'chat-42' });
+    const res = await app.request('/api/subscribers/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({ code: 'REPEAT' }),
+    });
+    // existing chat-42 from previous test → reuses row
+    expect([200, 201]).toContain(res.status);
+    const body = (await res.json()) as { handle: string; enabled: boolean };
+    expect(body.handle).toBe('chat-42');
+    expect(body.enabled).toBe(true);
   });
 });
 
