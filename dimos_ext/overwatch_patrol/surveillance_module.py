@@ -42,6 +42,33 @@ from .surveillance_core import (
 log = structlog.get_logger()
 
 
+_FILE_LOG_PATH = "/tmp/overwatch_surveillance.log"
+_file_log_configured = False
+
+
+def _setup_file_log() -> None:
+    """Mirror everything from this module's stdlib logger to a known file.
+
+    The dimos worker process's stderr can be hard to reach in practice
+    (the sim runs in the operator's terminal, behind a multiprocessing
+    forkserver). A dedicated file gives us a deterministic trail for
+    diagnosing why patrol isn't moving.
+    """
+    global _file_log_configured
+    if _file_log_configured:
+        return
+    import logging
+
+    handler = logging.FileHandler(_FILE_LOG_PATH, mode="a")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(name)s] %(message)s"),
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    _file_log_configured = True
+
+
 class SurveillanceModuleConfig(ModuleConfig):
     """Dimos-compatible config (spec §7.1).
 
@@ -81,6 +108,7 @@ class SurveillanceModule(Module):
         # Set in main(); used by handle_goal_reached + the patrol loop.
         self._goal_reached_event: Optional[asyncio.Event] = None
         self._supervisor_task: Optional[asyncio.Task[None]] = None
+        self._patrol_thread: Optional[Any] = None
         self.core = SurveillanceCore(
             config=SurveillanceCoreConfig(
                 detector_period_s=self.config.detector_period_s,
@@ -92,7 +120,14 @@ class SurveillanceModule(Module):
             publish=self._publish_event,
             current_pose=lambda: self._pose,
         )
+        # Open a file-based diagnostic log so we can see what's
+        # happening inside the dimos worker process even if the sim
+        # console output is buried. structlog goes to stderr which
+        # might be redirected; this is belt-and-braces.
+        _setup_file_log()
+        log.info("surveillance.module_init_done")
         self._start_odom_listener()
+        self._start_cmd_vel_patrol_thread()
 
     # ------------------------------------------------------------------
     # Event publishing.
@@ -179,6 +214,146 @@ class SurveillanceModule(Module):
         )
         self._odom_thread.start()
 
+    def _start_cmd_vel_patrol_thread(self) -> None:
+        """Thread that drives the robot through waypoints via /cmd_vel.
+
+        Bypasses dimos's planner entirely — we publish Twist messages
+        on the same LCM channel the Go2 connection subscribes to
+        (`/cmd_vel#geometry_msgs.Twist`). No obstacle avoidance, no
+        replanning — but it actually moves the robot, which is what
+        the operator needs first. Upgrade path: switch to set_goal
+        once we've debugged the planner-stream wiring.
+        """
+        import threading
+
+        def _run() -> None:
+            import math
+            import time
+
+            try:
+                import lcm  # type: ignore
+                from dimos_lcm.geometry_msgs.Twist import Twist  # type: ignore
+                from dimos_lcm.geometry_msgs.Vector3 import Vector3  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.cmd_vel_lcm_missing", error=str(e))
+                return
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+
+            def publish_vel(lx: float, ly: float, az: float) -> None:
+                t = Twist()
+                t.linear = Vector3()
+                t.linear.x = float(lx)
+                t.linear.y = float(ly)
+                t.linear.z = 0.0
+                t.angular = Vector3()
+                t.angular.x = 0.0
+                t.angular.y = 0.0
+                t.angular.z = float(az)
+                lc.publish("/cmd_vel#geometry_msgs.Twist", t.lcm_encode())
+
+            def norm_angle(a: float) -> float:
+                return (a + math.pi) % (2 * math.pi) - math.pi
+
+            ARRIVAL_RADIUS_M = 0.4
+            DWELL_S = 1.0
+            TIMEOUT_S = 90.0
+            LINEAR_SPEED = 0.5
+            ANGULAR_SPEED = 0.9
+            ALIGN_TOL_RAD = 0.25
+
+            log.info("surveillance.patrol_thread_alive")
+            last_state = None
+            ticks = 0
+            while True:
+                ticks += 1
+                if ticks % 100 == 0:
+                    # Heartbeat every ~10s so we know the thread is
+                    # alive even when state is IDLE.
+                    log.info(
+                        "surveillance.patrol_thread_tick",
+                        state=self.core.ctx.state.value,
+                        waypoints=len(self.core.waypoints),
+                        pose=tuple(round(v, 2) for v in self._pose),
+                    )
+
+                state = self.core.ctx.state
+                if state != last_state:
+                    log.info("surveillance.patrol_state", state=state.value)
+                    last_state = state
+
+                if state != State.PATROLLING:
+                    time.sleep(0.1)
+                    continue
+
+                waypoints = list(self.core.waypoints)
+                if not waypoints:
+                    time.sleep(0.5)
+                    continue
+
+                cursor = self.core.ctx.cursor_index % len(waypoints)
+                wp = waypoints[cursor]
+                log.info(
+                    "surveillance.patrol_goto",
+                    index=cursor,
+                    name=wp.name,
+                    goal=(round(wp.pose_x, 2), round(wp.pose_y, 2)),
+                    start_pose=tuple(round(v, 2) for v in self._pose),
+                )
+
+                start_t = time.time()
+                arrived = False
+                while self.core.ctx.state == State.PATROLLING:
+                    if time.time() - start_t > TIMEOUT_S:
+                        log.warning(
+                            "surveillance.patrol_timeout",
+                            waypoint=wp.name,
+                            final_pose=tuple(round(v, 2) for v in self._pose),
+                        )
+                        break
+
+                    x, y, yaw = self._pose
+                    dx = wp.pose_x - x
+                    dy = wp.pose_y - y
+                    dist = math.hypot(dx, dy)
+                    if dist < ARRIVAL_RADIUS_M:
+                        arrived = True
+                        break
+
+                    desired_yaw = math.atan2(dy, dx)
+                    yaw_err = norm_angle(desired_yaw - yaw)
+                    if abs(yaw_err) > ALIGN_TOL_RAD:
+                        az = max(-ANGULAR_SPEED, min(ANGULAR_SPEED, 1.4 * yaw_err))
+                        publish_vel(0.0, 0.0, az)
+                    else:
+                        speed = min(LINEAR_SPEED, max(0.15, dist * 0.8))
+                        az = max(-0.5, min(0.5, 1.0 * yaw_err))
+                        publish_vel(speed, 0.0, az)
+
+                    time.sleep(0.1)
+
+                publish_vel(0.0, 0.0, 0.0)
+
+                if arrived and self.core.ctx.state == State.PATROLLING:
+                    log.info(
+                        "surveillance.patrol_arrived",
+                        waypoint=wp.name,
+                        final_pose=tuple(round(v, 2) for v in self._pose),
+                    )
+                    time.sleep(DWELL_S)
+                    self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
+                elif not arrived:
+                    # Timed out — advance anyway rather than loop on
+                    # an unreachable target forever.
+                    self.core.ctx.cursor_index = (cursor + 1) % len(waypoints)
+
+        self._patrol_thread = threading.Thread(
+            target=_run, daemon=True, name="surveillance-patrol-cmd-vel",
+        )
+        self._patrol_thread.start()
+
     # ------------------------------------------------------------------
     # Patrol loop — drives the robot through `core.waypoints` whenever
     # state == PATROLLING by feeding goals to the ReplanningAStarPlanner.
@@ -196,32 +371,14 @@ class SurveillanceModule(Module):
     NO_WAYPOINTS_SLEEP_S = 1.0
 
     async def main(self) -> AsyncGenerator[None, None]:
-        self._goal_reached_event = asyncio.Event()
-        self._supervisor_task = asyncio.create_task(self._patrol_supervisor())
-        # Surface dependency wiring so silent autoconnect failures
-        # show up in the sim console rather than during the first
-        # start_surveillance attempt.
-        planner_attached = False
-        try:
-            planner_attached = self._planner_spec is not None
-        except Exception:  # noqa: BLE001
-            planner_attached = False
-        log.info(
-            "surveillance.main_started",
-            planner_attached=planner_attached,
-        )
+        """Lifecycle hook. The actual patrol drive lives in
+        `_start_cmd_vel_patrol_thread` (started in __init__) because
+        the planner-stream path silently drops goals on our worker
+        layout; once that's resolved we'll move the loop back into
+        async territory.
+        """
+        log.info("surveillance.main_started")
         yield
-        # Teardown: cancel supervisor + any in-flight goal.
-        if self._supervisor_task is not None and not self._supervisor_task.done():
-            self._supervisor_task.cancel()
-            try:
-                await self._supervisor_task
-            except asyncio.CancelledError:
-                pass
-        try:
-            self._planner_spec.cancel_goal()
-        except Exception:  # noqa: BLE001
-            pass
 
     async def handle_goal_reached(self, _msg: Bool) -> None:
         """Planner says we arrived. Wake the current leg."""
