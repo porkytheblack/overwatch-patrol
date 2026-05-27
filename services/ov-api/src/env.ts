@@ -97,6 +97,7 @@ const env = z
     ROBOT_MJPEG_URL: z
       .string()
       .default('http://host.docker.internal:7001/video_feed/color_image'),
+    MCP_URL: z.string().default('http://host.docker.internal:9990/mcp'),
     DEEP_LINK_SECRET: z.string().min(16),
     DEEP_LINK_TTL_HOURS: z.coerce.number().int().positive().default(24),
     DASHBOARD_BASE_URL: z.string().default('http://localhost:3001'),
@@ -112,5 +113,6 @@ export const ENV = {
   BRIDGE_WS_URL: remapDockerHost(env.BRIDGE_WS_URL, 'BRIDGE_WS_URL') ?? env.BRIDGE_WS_URL,
   ROBOT_MJPEG_URL:
     remapDockerHost(env.ROBOT_MJPEG_URL, 'ROBOT_MJPEG_URL') ?? env.ROBOT_MJPEG_URL,
+  MCP_URL: remapDockerHost(env.MCP_URL, 'MCP_URL') ?? env.MCP_URL,
 };
 export type Env = typeof ENV;

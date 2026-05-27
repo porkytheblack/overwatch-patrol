@@ -2,6 +2,7 @@ import { Shell } from '@/components/Shell';
 import { apiFetch } from '@/lib/api';
 import { redirect } from 'next/navigation';
 import { PatrolEditor } from './PatrolEditor';
+import { PatrolControls } from './PatrolControls';
 import { WaypointMap } from '@/components/WaypointMap';
 
 interface Waypoint {
@@ -32,6 +33,9 @@ export default async function Page() {
   const waypoints = await getWaypoints();
   return (
     <Shell>
+      <div className="p-4 max-w-6xl space-y-4">
+        <PatrolControls />
+      </div>
       <div className="p-4 max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div>
           <h1 className="mono uppercase text-sm tracking-[0.04em] mb-4">PATROL · MAP</h1>
