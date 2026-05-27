@@ -62,18 +62,9 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
 
   return (
     <div className="space-y-2">
-      <div className="mono text-xs text-text-muted">
-        {waypoints.length} waypoint{waypoints.length === 1 ? '' : 's'}
+      <div className="mono text-xs text-text-dim">
+        click a waypoint to configure targets · ↑↓ to reorder · DELETE to remove
       </div>
-      {waypoints.length === 0 && (
-        <div className="card mono text-sm space-y-2">
-          <div className="text-text">no waypoints yet</div>
-          <div className="text-text-dim text-xs">
-            use MANUAL DRIVE above to position the robot, then name it with ADD WAYPOINT.
-            Once you have 1+ waypoints, press START PATROL to begin cycling.
-          </div>
-        </div>
-      )}
       {waypoints.map((w) => (
         <details key={w.id} className="card">
           <summary className="cursor-pointer flex items-center gap-3 list-none">
