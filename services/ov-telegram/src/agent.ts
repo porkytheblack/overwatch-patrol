@@ -1,29 +1,40 @@
 /**
  * Conversational agent layer.
  *
- * The agent IS the dimos MCP server — the Glove instance loads its tool list
- * dynamically each turn via `mountMcp`. Read-only queries (search_incidents,
- * etc.) and control skills (go_to_waypoint, execute_sport_command) are exposed
- * to the LLM through the same MCP transport.
+ * Built on Glove (`glove-core` + `glove-mcp`):
+ * - Persistent `TelegramStore` per chat_id (rows in `agent_conversations`).
+ * - One Glove instance per chat_id, cached in-process (slow rebuild and
+ *   per-turn `mountMcp` removed — first message warms; subsequent messages
+ *   reuse).
+ * - MCP tools come from the robot at `MCP_URL` via `mountMcp`, so the
+ *   tool list updates whenever the robot redeploys.
+ * - Confirmation-required tools (spec §13) are intercepted before
+ *   `executor.executeTool` runs, the call is stashed in
+ *   `agent_conversations.pending_confirmation`, and the model is handed a
+ *   "waiting for operator confirmation" stub result so its turn finishes
+ *   cleanly. On the next user message the gate is checked: `y` re-issues
+ *   the same MCP tool call, `n` drops it, anything else cancels and falls
+ *   through into a regular turn.
  *
- * Confirmation-required tools (sport flips, stop_surveillance, delete_waypoint)
- * are intercepted via a Glove hook that stashes `{tool, args}` into
- * `agent_conversations.pending_confirmation` and short-circuits the turn with a
- * one-line "Reply y to confirm" prompt.
+ * The executor monkey-patch is the smallest narrow shim we can use
+ * today — glove-core 3.0 doesn't expose a public ToolMiddleware API. The
+ * shim is documented in code and contained to this file; if a public
+ * middleware ships, swap it in here without touching anything else.
  */
-import { Glove, MemoryStore, Displaymanager, createAdapter, type Message } from 'glove-core';
+import {
+  Glove,
+  Displaymanager,
+  createAdapter,
+  type IGloveRunnable,
+  type Message,
+} from 'glove-core';
 import { mountMcp, type McpAdapter, type McpCatalogueEntry } from 'glove-mcp';
-import { eq } from 'drizzle-orm';
-import { schema, newId, nowIso } from '@overwatch/shared-ts';
-import { db } from './db.js';
+import { newId } from '@overwatch/shared-ts';
 import { ENV } from './env.js';
 import { log } from './log.js';
+import { TelegramStore } from './store.js';
 
-export const CONFIRM_TOOLS = new Set<string>([
-  'stop_surveillance',
-  'delete_waypoint',
-  // execute_sport_command is intercepted by inspecting args.command_name
-]);
+export const CONFIRM_TOOLS = new Set<string>(['stop_surveillance', 'delete_waypoint']);
 
 export const CONFIRM_SPORT_COMMANDS = new Set<string>([
   'FrontFlip',
@@ -59,58 +70,7 @@ Rules:
 - The operator is reaching you via Telegram. Keep messages under Telegram's
   4096-character limit; paginate or summarize if needed.`;
 
-interface ConvoState {
-  id: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
-  pending_confirmation: { tool: string; args: Record<string, unknown> } | null;
-}
-
-function loadConvo(handle: string): ConvoState {
-  const row = db
-    .select()
-    .from(schema.agentConversations)
-    .where(eq(schema.agentConversations.handle, handle))
-    .get();
-  if (row) {
-    return {
-      id: row.id,
-      messages: JSON.parse(row.messages),
-      pending_confirmation: row.pending_confirmation ? JSON.parse(row.pending_confirmation) : null,
-    };
-  }
-  const id = newId();
-  db.insert(schema.agentConversations)
-    .values({
-      id,
-      channel: 'telegram',
-      handle,
-      messages: '[]',
-      pending_confirmation: null,
-      last_active: nowIso(),
-    })
-    .run();
-  return { id, messages: [], pending_confirmation: null };
-}
-
-function saveConvo(state: ConvoState) {
-  // Keep last 20 turns
-  const trimmed = state.messages.slice(-20);
-  db.update(schema.agentConversations)
-    .set({
-      messages: JSON.stringify(trimmed),
-      pending_confirmation: state.pending_confirmation
-        ? JSON.stringify(state.pending_confirmation)
-        : null,
-      last_active: nowIso(),
-    })
-    .where(eq(schema.agentConversations.id, state.id))
-    .run();
-}
-
-/**
- * Minimal MCP adapter — single static server (the robot's MCP endpoint), no
- * per-conversation activation needed.
- */
+/** Minimal McpAdapter — single static server, no per-conversation activation. */
 class RobotMcpAdapter implements McpAdapter {
   identifier = 'robot';
   async getActive() {
@@ -132,7 +92,7 @@ const CATALOGUE: McpCatalogueEntry[] = [
   },
 ];
 
-function requiresConfirmation(tool: string, args: Record<string, unknown>): boolean {
+function isConfirmTool(tool: string, args: Record<string, unknown>): boolean {
   // Tool names are MCP-namespaced as `robot__<name>`.
   const base = tool.split('__').pop() ?? tool;
   if (CONFIRM_TOOLS.has(base)) return true;
@@ -151,59 +111,28 @@ function describeAction(tool: string, args: Record<string, unknown>): string {
   return base;
 }
 
-export async function handleMessage(handle: string, text: string): Promise<string> {
-  const state = loadConvo(handle);
+interface AgentCacheEntry {
+  store: TelegramStore;
+  agent: IGloveRunnable;
+  /** Mutable slot the executor shim writes into when it intercepts a
+   *  confirmation-required tool call mid-turn. Read once after
+   *  `processRequest` resolves; cleared per-turn. */
+  pendingTrap: { tool: string; args: Record<string, unknown> } | null;
+}
 
-  // Confirmation gate
-  if (state.pending_confirmation) {
-    const lower = text.trim().toLowerCase();
-    if (['y', 'yes', 'confirm', 'ok'].includes(lower)) {
-      const pending = state.pending_confirmation;
-      state.pending_confirmation = null;
-      saveConvo(state);
-      // Execute via a fresh agent turn that immediately calls the tool.
-      const result = await executeToolDirectly(pending.tool, pending.args);
-      const reply = `confirmed · ${describeAction(pending.tool, pending.args)} · ${result}`;
-      state.messages.push({ role: 'user', content: text });
-      state.messages.push({ role: 'assistant', content: reply });
-      saveConvo(state);
-      return reply;
-    }
-    if (['n', 'no', 'cancel'].includes(lower)) {
-      const pending = state.pending_confirmation;
-      state.pending_confirmation = null;
-      const reply = `cancelled · ${describeAction(pending.tool, pending.args)}`;
-      state.messages.push({ role: 'user', content: text });
-      state.messages.push({ role: 'assistant', content: reply });
-      saveConvo(state);
-      return reply;
-    }
-    // Anything else → clear pending and fall through.
-    state.pending_confirmation = null;
-  }
+const agentCache = new Map<string, AgentCacheEntry>();
 
-  if (!ENV.AGENT) {
-    return 'agent offline · no provider configured (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)';
-  }
+/** Reset the cached agent for a chat — used by /reset hook + tests. */
+export function resetAgentForChat(chat_id: string): void {
+  agentCache.delete(chat_id);
+}
 
-  state.messages.push({ role: 'user', content: text });
+async function getOrCreateAgent(chat_id: string): Promise<AgentCacheEntry | null> {
+  const cached = agentCache.get(chat_id);
+  if (cached) return cached;
+  if (!ENV.AGENT) return null;
 
-  const store = new MemoryStore(`telegram-${handle}`);
-  // Replay history so the model has context
-  for (const m of state.messages) {
-    await store.appendMessages?.([
-      { sender: m.role === 'user' ? 'user' : 'agent', text: m.content },
-    ] as never);
-  }
-
-  let confirmationCaptured: { tool: string; args: Record<string, unknown> } | null = null;
-
-  log.info('agent.boot', {
-    handle,
-    provider: ENV.AGENT.provider,
-    model: ENV.AGENT.model,
-  });
-
+  const store = new TelegramStore(chat_id);
   const glove = new Glove({
     store,
     model: createAdapter({
@@ -221,28 +150,44 @@ export async function handleMessage(handle: string, text: string): Promise<strin
     },
   });
 
+  // `/reset` hook — operator can clear conversation memory mid-chat via
+  // Telegram. Persisted messages stay (the next turn just starts fresh
+  // because we drop the cache); the hook short-circuits the current turn.
+  glove.defineHook('reset', async () => ({
+    shortCircuit: {
+      message: { sender: 'agent', text: 'memory cleared · /reset' },
+    },
+  }));
+
+  const built = glove.build();
   try {
-    // mountMcp's signature accepts the runnable form; the builder is structurally compatible.
-    await mountMcp(glove as never, {
+    await mountMcp(built, {
       adapter: new RobotMcpAdapter(),
       entries: CATALOGUE,
       clientInfo: { name: 'overwatch-patrol/telegram', version: '0.1.0' },
     });
   } catch (e) {
-    log.error('mcp.mount_failed', { error: String(e) });
-    return 'agent offline · cannot reach robot MCP server';
+    log.error('mcp.mount_failed', { error: String(e), chat_id });
+    return null;
   }
 
-  const built = glove.build();
+  const entry: AgentCacheEntry = { store, agent: built, pendingTrap: null };
 
-  // Wrap executor: intercept confirmation-required tool calls.
+  // ── Executor shim ────────────────────────────────────────────────
+  // Wrap executor.executeTool so confirmation-required calls are stashed
+  // rather than dispatched. The model still gets a tool result back, so
+  // its turn completes cleanly with a "tell the operator to reply y"
+  // sentence (the system prompt nudges this shape).
+  //
+  // TODO: replace this with a public middleware API when glove-core
+  // exposes one. Today (3.0) there's no clean alternative.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const exec = (built as any).executor;
   const origExec = exec?.executeTool?.bind(exec);
   if (origExec) {
     exec.executeTool = async (call: { name: string; input: Record<string, unknown> }) => {
-      if (requiresConfirmation(call.name, call.input)) {
-        confirmationCaptured = { tool: call.name, args: call.input };
+      if (isConfirmTool(call.name, call.input)) {
+        entry.pendingTrap = { tool: call.name, args: call.input };
         return {
           status: 'success',
           data: `Waiting for operator confirmation to ${describeAction(call.name, call.input)}. Tell them to reply y to confirm.`,
@@ -250,29 +195,22 @@ export async function handleMessage(handle: string, text: string): Promise<strin
       }
       return origExec(call);
     };
+  } else {
+    log.warn('agent.executor_shim_unavailable', { chat_id });
   }
 
-  let result: Message | { messages: Message[] };
-  try {
-    result = await built.processRequest(text);
-  } catch (e) {
-    log.error('agent.error', { error: String(e) });
-    return `agent error · ${String(e).slice(0, 200)}`;
-  }
-
-  const msgs: Message[] = 'messages' in result ? result.messages : [result];
-  const reply = msgs.find((m) => m.sender === 'agent')?.text ?? '…';
-
-  if (confirmationCaptured) {
-    state.pending_confirmation = confirmationCaptured;
-  }
-  state.messages.push({ role: 'assistant', content: reply });
-  saveConvo(state);
-  return reply;
+  agentCache.set(chat_id, entry);
+  log.info('agent.cached', { chat_id, provider: ENV.AGENT.provider, model: ENV.AGENT.model });
+  return entry;
 }
 
-/** Confirmed-tool execution path: a one-shot MCP call. */
-async function executeToolDirectly(tool: string, args: Record<string, unknown>): Promise<string> {
+/** Direct one-shot MCP `tools/call` — used to fire a confirmed tool without
+ *  spinning the agent loop back up. Keeps the confirm path cheap and
+ *  deterministic. */
+async function executeToolDirectly(
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<string> {
   try {
     const res = await fetch(ENV.MCP_URL, {
       method: 'POST',
@@ -286,8 +224,74 @@ async function executeToolDirectly(tool: string, args: Record<string, unknown>):
     });
     if (!res.ok) return `error: ${res.status}`;
     const j = (await res.json()) as { result?: { content?: Array<{ text?: string }> } };
-    return (j.result?.content?.map((c) => c.text).filter(Boolean).join(' ') ?? 'ok').slice(0, 400);
+    return (
+      j.result?.content?.map((c) => c.text).filter(Boolean).join(' ') ?? 'ok'
+    ).slice(0, 400);
   } catch (e) {
     return `error: ${String(e).slice(0, 200)}`;
   }
+}
+
+/** Confirmation gate. Returns the reply text if this message landed on a
+ *  pending y/n; null when it didn't (caller should run the full agent turn). */
+async function handleConfirmation(
+  store: TelegramStore,
+  text: string,
+): Promise<string | null> {
+  const pending = store.getPendingConfirmation();
+  if (!pending) return null;
+  const lower = text.trim().toLowerCase();
+  if (['y', 'yes', 'confirm', 'ok'].includes(lower)) {
+    store.setPendingConfirmation(null);
+    const result = await executeToolDirectly(pending.tool, pending.args);
+    return `confirmed · ${describeAction(pending.tool, pending.args)} · ${result}`;
+  }
+  if (['n', 'no', 'cancel'].includes(lower)) {
+    store.setPendingConfirmation(null);
+    return `cancelled · ${describeAction(pending.tool, pending.args)}`;
+  }
+  // Anything else clears the pending slot and falls through to a normal
+  // agent turn — spec §7.7: "Anything else → clear pending and fall through."
+  store.setPendingConfirmation(null);
+  return null;
+}
+
+export async function handleMessage(chat_id: string, text: string): Promise<string> {
+  if (!ENV.AGENT) {
+    return 'agent offline · no provider configured (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)';
+  }
+
+  // The store handles its own per-chat row; constructing one here is
+  // cheap and gives us the pending-confirmation accessors regardless of
+  // whether the cached agent exists yet.
+  const tmpStore = new TelegramStore(chat_id);
+  const confirm = await handleConfirmation(tmpStore, text);
+  if (confirm !== null) return confirm;
+
+  const entry = await getOrCreateAgent(chat_id);
+  if (!entry) {
+    return 'agent offline · cannot reach robot MCP server';
+  }
+  // Reset the per-turn pending trap before processRequest fires.
+  entry.pendingTrap = null;
+
+  let result: Message | { messages: Message[] };
+  try {
+    result = await entry.agent.processRequest(text);
+  } catch (e) {
+    log.error('agent.error', { chat_id, error: String(e) });
+    return `agent error · ${String(e).slice(0, 200)}`;
+  }
+
+  const msgs: Message[] = 'messages' in result ? result.messages : [result];
+  const reply = msgs.find((m) => m.sender === 'agent')?.text ?? '…';
+
+  // If the executor shim trapped a confirmation-required call mid-turn,
+  // persist it so the next user message can resolve it.
+  if (entry.pendingTrap) {
+    entry.store.setPendingConfirmation(entry.pendingTrap);
+    entry.pendingTrap = null;
+  }
+
+  return reply;
 }
