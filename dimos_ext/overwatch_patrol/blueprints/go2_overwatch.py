@@ -119,9 +119,14 @@ def main() -> None:
             "[blueprint] OPENAI_API_KEY unset → LocalSpeakSkill (offline OS TTS).\n",
         )
 
+    # `_with_jpeglcm` IS `unitree_go2` with a JpegLcmTransport overriding the
+    # default `color_image` transport. Don't pass plain `unitree_go2` again
+    # afterwards — dimos's `autoconnect` merges transport_maps in order with
+    # "later wins", so `unitree_go2`'s pSHMTransport (on Mac) would silently
+    # clobber the JPEG-over-LCM override and our bridge would never see
+    # `/color_image` frames.
     go2_overwatch = autoconnect(
         _with_jpeglcm,
-        unitree_go2,
         # In-memory stub satisfies the SpatialMemorySpec that
         # NavigationSkillContainer requires, without needing CLIP / ChromaDB
         # (which require a CUDA GPU and a writable assets dir).
