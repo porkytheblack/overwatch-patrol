@@ -1,6 +1,6 @@
 import { config as loadDotenv } from 'dotenv';
-import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
@@ -9,13 +9,53 @@ import { z } from 'zod';
 // compose the env comes from the `environment:` section and the repo-root
 // .env is absent — dotenv silently no-ops.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = join(__dirname, '..', '..', '..');
+const repoRoot = resolve(__dirname, '..', '..', '..');
 const dotenvPath = join(repoRoot, '.env');
 if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
 
+/**
+ * Resolve SQLITE_PATH to something the current process can actually write.
+ *
+ * - Inside Docker compose, `/data` is mounted as a tmpfs/bind volume and is
+ *   writable; honour the path as-is.
+ * - On a host (Mac/Linux) without root, `/data` doesn't exist and can't be
+ *   created. Remap any such path to `<repoRoot>/data/<basename>` and log
+ *   a warning the operator can spot.
+ * - Relative paths resolve against the repo root for predictability.
+ */
+function resolveSqlitePath(input: string | undefined): string {
+  const raw = input ?? join(repoRoot, 'data', 'overwatch.db');
+  const isInDataRoot = raw.startsWith('/data/') || raw === '/data';
+  if (isInDataRoot && !canWrite('/data')) {
+    const remapped = join(repoRoot, 'data', basename(raw));
+    process.stderr.write(
+      `[env] SQLITE_PATH ${JSON.stringify(raw)} not writable on this host; ` +
+        `using ${JSON.stringify(remapped)} instead. Set SQLITE_PATH in .env ` +
+        `to silence this notice.\n`,
+    );
+    return remapped;
+  }
+  if (!isAbsolute(raw)) return resolve(repoRoot, raw);
+  return raw;
+}
+
+function canWrite(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    try {
+      accessSync(dirname(path), constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 const env = z
   .object({
-    SQLITE_PATH: z.string().default('/data/overwatch.db'),
+    SQLITE_PATH: z.string().optional(),
     SESSION_SECRET: z.string().min(16),
     BRIDGE_WS_URL: z.string().default('ws://host.docker.internal:7001/events'),
     ROBOT_MJPEG_URL: z
@@ -30,5 +70,8 @@ const env = z
   })
   .parse(process.env);
 
-export const ENV = env;
-export type Env = typeof env;
+export const ENV = {
+  ...env,
+  SQLITE_PATH: resolveSqlitePath(env.SQLITE_PATH),
+};
+export type Env = typeof ENV;

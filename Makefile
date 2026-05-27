@@ -4,7 +4,8 @@ SVC ?=
 
 # Ensure a .env exists with sane secrets. Generates one from .env.example
 # and fills in SESSION_SECRET / DEEP_LINK_SECRET via openssl if they're
-# still the placeholders.
+# still the placeholders. Also migrates old container-style data paths
+# (/data/...) to repo-relative paths on host runs.
 ensure-env:
 	@if [ ! -f .env ]; then \
 		echo "▸ creating .env from .env.example"; \
@@ -20,6 +21,15 @@ ensure-env:
 		secret="$$(openssl rand -hex 32)"; \
 		sed -i.bak "s|^DEEP_LINK_SECRET=.*|DEEP_LINK_SECRET=$$secret|" .env && rm -f .env.bak; \
 	fi
+	@if grep -q '^SQLITE_PATH=/data/' .env 2>/dev/null; then \
+		echo "▸ migrating SQLITE_PATH /data/... → ./data/... (host-friendly)"; \
+		sed -i.bak 's|^SQLITE_PATH=/data/|SQLITE_PATH=./data/|' .env && rm -f .env.bak; \
+	fi
+	@if grep -q '^STATION_DB_PATH=/data/' .env 2>/dev/null; then \
+		echo "▸ migrating STATION_DB_PATH /data/... → ./data/..."; \
+		sed -i.bak 's|^STATION_DB_PATH=/data/|STATION_DB_PATH=./data/|' .env && rm -f .env.bak; \
+	fi
+	@mkdir -p ./data
 	@echo "✓ .env ready"
 
 # ---- Python ---------------------------------------------------------------
