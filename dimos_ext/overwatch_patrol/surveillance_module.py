@@ -126,8 +126,63 @@ class SurveillanceModule(Module):
         # might be redirected; this is belt-and-braces.
         _setup_file_log()
         log.info("surveillance.module_init_done")
+        # Waypoints survive sim restarts in SQLite (via the bridge),
+        # but the in-memory list does not. Bootstrap from disk so a
+        # post-restart START PATROL cycles the waypoints the operator
+        # already set up.
+        self._load_waypoints_from_sqlite()
         self._start_odom_listener()
         self._start_cmd_vel_patrol_thread()
+
+    def _load_waypoints_from_sqlite(self) -> None:
+        sqlite_path = os.environ.get("SQLITE_PATH") or ""
+        if not sqlite_path:
+            log.info("surveillance.waypoints_load_skipped", reason="no SQLITE_PATH")
+            return
+        try:
+            import sqlite3
+
+            uri = f"file:{sqlite_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                rows = conn.execute(
+                    "SELECT id, name, pose_x, pose_y, pose_yaw, targets, "
+                    "linger_threshold_seconds, inspection_dwell_seconds, "
+                    "min_standoff_m, enabled "
+                    "FROM waypoints WHERE enabled=1 ORDER BY order_index ASC"
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("surveillance.waypoints_load_fail", error=str(e))
+            return
+
+        loaded = []
+        for r in rows:
+            try:
+                targets = json.loads(r[5]) if r[5] else []
+            except Exception:  # noqa: BLE001
+                targets = []
+            loaded.append(
+                WaypointSpec(
+                    id=str(r[0]),
+                    name=str(r[1]),
+                    pose_x=float(r[2]),
+                    pose_y=float(r[3]),
+                    pose_yaw=float(r[4]),
+                    targets=list(targets),
+                    linger_threshold_seconds=float(r[6]),
+                    inspection_dwell_seconds=float(r[7]),
+                    min_standoff_m=float(r[8]),
+                    enabled=bool(r[9]),
+                ),
+            )
+        self.core.waypoints = loaded
+        log.info(
+            "surveillance.waypoints_loaded",
+            count=len(loaded),
+            names=[w.name for w in loaded],
+        )
 
     # ------------------------------------------------------------------
     # Event publishing.
