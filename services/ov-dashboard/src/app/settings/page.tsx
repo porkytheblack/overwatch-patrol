@@ -8,7 +8,7 @@ import { SubscribersForm } from './SubscribersForm';
 interface BotCfg {
   channel: string;
   enabled: boolean;
-  config: { bot_token_set: boolean } | null;
+  config: { bot_token_set: boolean; bot_username: string | null } | null;
 }
 interface Sub {
   id: string;
@@ -46,7 +46,7 @@ export default async function Page() {
         </section>
         <section>
           <h2 className="mono uppercase text-sm tracking-[0.04em] mb-3">SUBSCRIBERS</h2>
-          <SubscribersForm initial={subs} />
+          <SubscribersForm initial={subs} botUsername={bot.config?.bot_username ?? null} />
         </section>
         <section>
           <h2 className="mono uppercase text-sm tracking-[0.04em] mb-3">SYSTEM</h2>
