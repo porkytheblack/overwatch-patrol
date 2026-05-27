@@ -19,9 +19,35 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from pathlib import Path
+
+
+def _load_dotenv() -> None:
+    """Load `.env` from the repo root so make-targets pick up secrets.
+
+    Walks up from this file looking for a marker that says repo root.
+    Without this, `make sim` runs `python -m ...` with whatever env the
+    shell has, and OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY
+    set in .env never reach dimos's internal McpClient (which uses
+    langchain's init_chat_model() and defaults to OpenAI).
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / ".env"
+        if candidate.exists() and (parent / "pnpm-workspace.yaml").exists():
+            try:
+                from dotenv import load_dotenv  # type: ignore
+
+                load_dotenv(candidate)
+                sys.stderr.write(f"[blueprint] loaded .env from {candidate}\n")
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"[blueprint] could not load .env: {e}\n")
+            return
 
 
 def main() -> None:
+    _load_dotenv()
+
     try:
         from dimos.agents.mcp.mcp_client import McpClient
         from dimos.agents.mcp.mcp_server import McpServer
