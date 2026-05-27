@@ -1,6 +1,6 @@
 import { config as loadDotenv } from 'dotenv';
-import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
@@ -8,8 +8,34 @@ import { z } from 'zod';
 // env comes from the `environment:` section and .env isn't mounted — dotenv
 // silently no-ops then.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dotenvPath = join(__dirname, '..', '..', '..', '.env');
+const repoRoot = resolve(__dirname, '..', '..', '..');
+const dotenvPath = join(repoRoot, '.env');
 if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
+
+/** See services/ov-api/src/env.ts — same remap logic. */
+function resolveDataPath(raw: string, fallbackName: string): string {
+  const input = raw || join(repoRoot, 'data', fallbackName);
+  const isInDataRoot = input.startsWith('/data/') || input === '/data';
+  if (isInDataRoot && !canWrite('/data')) {
+    return join(repoRoot, 'data', basename(input));
+  }
+  if (!isAbsolute(input)) return resolve(repoRoot, input);
+  return input;
+}
+
+function canWrite(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    try {
+      accessSync(dirname(path), constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
 
 const raw = z
   .object({
@@ -120,6 +146,8 @@ function pickKey(provider: string): string | undefined {
 
 export const ENV = {
   ...raw,
+  SQLITE_PATH: resolveDataPath(raw.SQLITE_PATH, 'overwatch.db'),
+  STATION_DB_PATH: resolveDataPath(raw.STATION_DB_PATH, 'station.db'),
   /** Resolved LLM config — null if no provider is configured. */
   AGENT: resolveProvider(),
 };
