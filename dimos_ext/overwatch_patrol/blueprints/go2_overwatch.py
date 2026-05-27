@@ -22,6 +22,7 @@ def main() -> None:
         from dimos.agents.mcp.mcp_client import McpClient
         from dimos.agents.mcp.mcp_server import McpServer
         from dimos.core.coordination.blueprints import autoconnect
+        from dimos.core.coordination.module_coordinator import ModuleCoordinator
         from dimos.robot.unitree.go2.blueprints.smart.unitree_go2_spatial import (
             unitree_go2_spatial,
         )
@@ -60,8 +61,10 @@ def main() -> None:
         McpClient.blueprint(),
     )
 
-    # dimos blueprints expose `.build().loop()` as the main run loop.
-    go2_overwatch.build().loop()
+    # dimos runs blueprints via ModuleCoordinator.build(blueprint).loop().
+    coordinator = ModuleCoordinator.build(go2_overwatch)
+    coordinator.start_rpyc_service()
+    coordinator.loop()
 
 
 if __name__ == "__main__":
