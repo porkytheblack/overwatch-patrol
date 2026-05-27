@@ -63,12 +63,23 @@ export function PatrolEditor({ initial }: { initial: Waypoint[] }) {
   return (
     <div className="space-y-2">
       <div className="mono text-xs text-text-muted">
-        {waypoints.length} waypoint{waypoints.length === 1 ? '' : 's'} · drive the robot to a
-        position and add via Telegram (<code className="mono">/add front_gate</code>) or a paired
-        controller
+        {waypoints.length} waypoint{waypoints.length === 1 ? '' : 's'}
       </div>
       {waypoints.length === 0 && (
-        <div className="card text-text-dim mono text-sm">no waypoints · drive the robot to a position and add one</div>
+        <div className="card mono text-sm space-y-2">
+          <div className="text-text">no waypoints yet</div>
+          <div className="text-text-dim text-xs">
+            drive the robot to a position you want patrolled, then add a waypoint by
+            messaging the Telegram bot:{' '}
+            <code className="mono text-text">add_waypoint front_gate</code>
+            <br />
+            (set the bot token in{' '}
+            <a href="/settings" className="text-accent">
+              settings
+            </a>{' '}
+            first)
+          </div>
+        </div>
       )}
       {waypoints.map((w) => (
         <details key={w.id} className="card">
