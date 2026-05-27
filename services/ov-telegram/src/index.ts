@@ -3,16 +3,25 @@
  *
  * Token is loaded from `bot_configs.telegram` in SQLite (set via the dashboard).
  * Bridge events drive outbound notifications; inbound messages drive the agent.
+ *
+ * First-run linking (spec §11 extension):
+ *   - Operator opens dashboard → Settings → Telegram, sees the claim-code
+ *     instructions. They send `/start` to the bot; we mint a 6-char code
+ *     and reply with it. They paste it into the dashboard's claim form,
+ *     which POSTs to /api/subscribers/claim.
  */
 import { createServer } from 'node:http';
 import TelegramBot from 'node-telegram-bot-api';
-import { newId, nowIso, signDeepLink } from '@overwatch/shared-ts';
+import { eq } from 'drizzle-orm';
+import { schema, newId, nowIso, signDeepLink } from '@overwatch/shared-ts';
 import { ENV } from './env.js';
 import { log } from './log.js';
 import { ConfigWatcher } from './config-watcher.js';
 import { BridgeWs } from './bridge-ws.js';
 import { onIncidentOpened, onClipReady, onRobotStateChanged, setBot } from './notifications.js';
 import { handleMessage } from './agent.js';
+import { issueClaimCode, purgeExpiredCodes } from './claim.js';
+import { db } from './db.js';
 
 let bot: TelegramBot | null = null;
 let pollingHandle: TelegramBot | null = null;
@@ -49,22 +58,95 @@ async function ackViaMcp(incidentId: string, userHandle: string): Promise<boolea
   }
 }
 
+/** Persist the bot's @username back into bot_configs so the dashboard
+ *  can render "search @YourBotUsername" in the claim instructions. */
+async function persistBotIdentity(b: TelegramBot): Promise<void> {
+  try {
+    const me = await b.getMe();
+    if (!me.username) return;
+    const row = db
+      .select()
+      .from(schema.botConfigs)
+      .where(eq(schema.botConfigs.channel, 'telegram'))
+      .get();
+    if (!row) return;
+    const cfg = JSON.parse(row.config) as Record<string, unknown>;
+    if (cfg.bot_username === me.username) return;
+    cfg.bot_username = me.username;
+    db.update(schema.botConfigs)
+      .set({ config: JSON.stringify(cfg) })
+      .where(eq(schema.botConfigs.channel, 'telegram'))
+      .run();
+    log.info('tg.username_persisted', { username: me.username });
+  } catch (e) {
+    log.warn('tg.username_persist_failed', { error: String(e) });
+  }
+}
+
+function isStartCommand(text: string): boolean {
+  // `/start` or `/start anything-after`. Telegram also passes `/start@MyBot`
+  // when the user is in a group — accept either.
+  return /^\/start(@\S+)?(\s|$)/i.test(text);
+}
+
+async function handleStart(b: TelegramBot, chat_id: string, chat_handle: string | null) {
+  // Best-effort GC so the table stays small.
+  try {
+    purgeExpiredCodes();
+  } catch (e) {
+    log.warn('claim.purge_failed', { error: String(e) });
+  }
+  const issued = issueClaimCode(chat_id, chat_handle ?? undefined);
+  const expiresMins = Math.max(
+    1,
+    Math.round((new Date(issued.expires_at).getTime() - Date.now()) / 60_000),
+  );
+  const body =
+    `OVERWATCH PATROL · LINKING\n\n` +
+    `Your claim code: ${issued.code}\n` +
+    `Expires in ~${expiresMins} min\n\n` +
+    `Paste this into the dashboard:\n` +
+    `Settings → Subscribers → "I have a claim code"\n` +
+    `Once linked, this chat will receive incident alerts and accept commands.`;
+  await b.sendMessage(chat_id, body);
+  log.info('tg.claim_issued', { chat_id, code: issued.code, reused: issued.reused });
+}
+
 function start(token: string) {
   stop();
   bot = new TelegramBot(token, { polling: true });
   pollingHandle = bot;
   setBot(bot);
 
+  // Fire-and-forget: cache the @username back in bot_configs.
+  persistBotIdentity(bot).catch((e) =>
+    log.warn('tg.persist_identity_failed', { error: String(e) }),
+  );
+
   bot.on('message', async (msg) => {
     if (!msg.text || !msg.chat?.id) return;
-    const handle = String(msg.chat.id);
-    log.info('tg.message', { handle, text: msg.text.slice(0, 120) });
+    const chat_id = String(msg.chat.id);
+    const chat_handle = msg.from?.username ?? null;
+
+    if (isStartCommand(msg.text)) {
+      try {
+        await handleStart(bot!, chat_id, chat_handle);
+      } catch (e) {
+        log.error('tg.start_error', { error: String(e) });
+        await bot!
+          .sendMessage(chat_id, 'error · could not generate claim code')
+          .catch(() => undefined);
+      }
+      return;
+    }
+
+    log.info('tg.message', { chat_id, text: msg.text.slice(0, 120) });
     try {
-      const reply = await handleMessage(handle, msg.text);
-      await bot!.sendMessage(handle, reply);
+      const reply = await handleMessage(chat_id, msg.text);
+      await bot!.sendMessage(chat_id, reply);
     } catch (e) {
       log.error('tg.error', { error: String(e) });
-      await bot!.sendMessage(handle, 'error · agent failed').catch(() => undefined);
+      await bot!.sendMessage(chat_id, 'error · agent failed').catch(() => undefined);
     }
   });
 
