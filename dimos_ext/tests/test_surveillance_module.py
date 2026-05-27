@@ -9,26 +9,26 @@ from __future__ import annotations
 import uuid
 
 from overwatch_patrol.state_machine import State
-from overwatch_patrol.surveillance_module import (
-    SurveillanceModule,
-    SurveillanceModuleConfig,
+from overwatch_patrol.surveillance_core import (
+    SurveillanceCore,
+    SurveillanceCoreConfig,
     WaypointSpec,
 )
 
 
-def _make_module(now: float = 100.0) -> tuple[SurveillanceModule, list[tuple[str, dict]]]:
-    """Construct a module that captures all LCM publishes for inspection."""
+def _make_module(now: float = 100.0) -> tuple[SurveillanceCore, list[tuple[str, dict]]]:
+    """Construct a core that captures all LCM publishes for inspection."""
     events: list[tuple[str, dict]] = []
-    m = SurveillanceModule(
-        config=SurveillanceModuleConfig(
+    m = SurveillanceCore(
+        config=SurveillanceCoreConfig(
             patrol_grace_seconds=2.0,
             manual_override_idle_seconds=60.0,
             inspection_timeout_seconds=30.0,
             cooldown_seconds=3.0,
         ),
         clock=lambda: now,
+        publish=lambda topic, payload: events.append((topic, payload)),
     )
-    m.publish_lcm = lambda topic, payload: events.append((topic, payload))
     return m, events
 
 

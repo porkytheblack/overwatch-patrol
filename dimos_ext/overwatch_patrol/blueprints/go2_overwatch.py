@@ -49,9 +49,9 @@ def main() -> None:
     go2_overwatch = autoconnect(
         _with_jpeglcm,
         unitree_go2_spatial,
-        SurveillanceModule.blueprint(camera_info=GO2Connection.camera_info_static),  # type: ignore[attr-defined]
-        ClipRecorderModule.blueprint(output_dir=clip_dir),  # type: ignore[attr-defined]
-        SurveillanceQueryModule.blueprint(sqlite_path=sqlite_path),  # type: ignore[attr-defined]
+        SurveillanceModule.blueprint(camera_info=GO2Connection.camera_info_static),
+        ClipRecorderModule.blueprint(output_dir=clip_dir),
+        SurveillanceQueryModule.blueprint(sqlite_path=sqlite_path),
         NavigationSkillContainer.blueprint(),
         PersonFollowSkillContainer.blueprint(camera_info=GO2Connection.camera_info_static),
         UnitreeSkillContainer.blueprint(),
@@ -60,8 +60,8 @@ def main() -> None:
         McpClient.blueprint(),
     )
 
-    # dimos blueprints expose `.run()` (or compatible) via `autoconnect`.
-    go2_overwatch.run()
+    # dimos blueprints expose `.build().loop()` as the main run loop.
+    go2_overwatch.build().loop()
 
 
 if __name__ == "__main__":
