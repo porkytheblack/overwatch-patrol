@@ -80,6 +80,17 @@ def main() -> None:
     sqlite_path = os.environ.get("SQLITE_PATH", "/data/overwatch.db")
     clip_dir = os.environ.get("CLIP_DIR", "/data/clips")
 
+    # SpeakSkill uses OpenAI TTS and crashes on start() without OPENAI_API_KEY.
+    # The v1 demo doesn't need spoken robot output (the Telegram bot is the
+    # voice), so make it opt-in: include only when the key is present.
+    optional_modules: list = []
+    if os.environ.get("OPENAI_API_KEY"):
+        optional_modules.append(SpeakSkill.blueprint())
+    else:
+        sys.stderr.write(
+            "[blueprint] OPENAI_API_KEY unset → skipping SpeakSkill (robot voice disabled).\n",
+        )
+
     go2_overwatch = autoconnect(
         _with_jpeglcm,
         unitree_go2,
@@ -93,7 +104,7 @@ def main() -> None:
         NavigationSkillContainer.blueprint(),
         PersonFollowSkillContainer.blueprint(camera_info=GO2Connection.camera_info_static),
         UnitreeSkillContainer.blueprint(),
-        SpeakSkill.blueprint(),
+        *optional_modules,
         McpServer.blueprint(),
         McpClient.blueprint(),
     )
