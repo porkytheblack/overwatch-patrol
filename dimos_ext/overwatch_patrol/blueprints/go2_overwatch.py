@@ -73,22 +73,40 @@ def main() -> None:
         g_overrides["robot_ip"] = robot_ip
 
     from overwatch_patrol.clip_recorder import ClipRecorderModule
+    from overwatch_patrol.local_speak_skill import LocalSpeakSkill
     from overwatch_patrol.query_module import SurveillanceQueryModule
+    from overwatch_patrol.spatial_memory_stub import SpatialMemoryStub
     from overwatch_patrol.surveillance_module import SurveillanceModule
 
     sqlite_path = os.environ.get("SQLITE_PATH", "/data/overwatch.db")
     clip_dir = os.environ.get("CLIP_DIR", "/data/clips")
 
+    # TTS selection — agent always gets a `speak(...)` tool:
+    #   OPENAI_API_KEY set → dimos SpeakSkill (cloud, high-quality voice)
+    #   otherwise          → LocalSpeakSkill (offline, OS native TTS)
+    if os.environ.get("OPENAI_API_KEY"):
+        speak_blueprint = SpeakSkill.blueprint()
+        sys.stderr.write("[blueprint] OPENAI_API_KEY set → SpeakSkill (OpenAI TTS).\n")
+    else:
+        speak_blueprint = LocalSpeakSkill.blueprint()
+        sys.stderr.write(
+            "[blueprint] OPENAI_API_KEY unset → LocalSpeakSkill (offline OS TTS).\n",
+        )
+
     go2_overwatch = autoconnect(
         _with_jpeglcm,
         unitree_go2,
+        # In-memory stub satisfies the SpatialMemorySpec that
+        # NavigationSkillContainer requires, without needing CLIP / ChromaDB
+        # (which require a CUDA GPU and a writable assets dir).
+        SpatialMemoryStub.blueprint(),
         SurveillanceModule.blueprint(camera_info=GO2Connection.camera_info_static),
         ClipRecorderModule.blueprint(output_dir=clip_dir),
         SurveillanceQueryModule.blueprint(sqlite_path=sqlite_path),
         NavigationSkillContainer.blueprint(),
         PersonFollowSkillContainer.blueprint(camera_info=GO2Connection.camera_info_static),
         UnitreeSkillContainer.blueprint(),
-        SpeakSkill.blueprint(),
+        speak_blueprint,
         McpServer.blueprint(),
         McpClient.blueprint(),
     )

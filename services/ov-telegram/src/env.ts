@@ -12,6 +12,14 @@ const repoRoot = resolve(__dirname, '..', '..', '..');
 const dotenvPath = join(repoRoot, '.env');
 if (existsSync(dotenvPath)) loadDotenv({ path: dotenvPath });
 
+// Compose env vars come through as empty strings when unset
+// (`VAR: ${VAR:-}` expands to `VAR=`). zod's `.optional()` only accepts
+// `undefined`, so we strip empty-string env values up front.
+const stripped: Record<string, string | undefined> = {};
+for (const [k, v] of Object.entries(process.env)) {
+  stripped[k] = v === '' ? undefined : v;
+}
+
 /** See services/ov-api/src/env.ts — same remap logic. */
 function resolveDataPath(raw: string, fallbackName: string): string {
   const input = raw || join(repoRoot, 'data', fallbackName);
@@ -69,7 +77,7 @@ const raw = z
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     STATION_DB_PATH: z.string().default('/data/station.db'),
   })
-  .parse(process.env);
+  .parse(stripped);
 
 /** Resolve which LLM provider to use this boot. */
 function resolveProvider(): {

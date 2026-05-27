@@ -3,18 +3,35 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Try to load .env from the repo root for host-mode runs. In Docker compose
-# the env comes from the `environment:` section and python-dotenv is not
-# required — we wrap the import so a missing dep doesn't crash the bridge.
+
+def _find_repo_root() -> Path:
+    """Walk up from this file looking for a marker that says "repo root".
+
+    On the host the layout is `<repo>/services/ov-bridge/bridge/config.py`
+    so the repo root is `parents[3]`. Inside Docker the bridge is copied
+    to `/app/bridge/config.py` and there is no parents[3] — we just return
+    the working directory.
+    """
+    here = Path(__file__).resolve()
+    for parent in (*here.parents, Path.cwd()):
+        # Markers that uniquely identify the repo root.
+        if (parent / "pnpm-workspace.yaml").exists() or (parent / ".env").exists():
+            return parent
+    return Path.cwd()
+
+
+_REPO_ROOT = _find_repo_root()
+
+# Best-effort .env load (host-mode only; in Docker the env is injected via
+# compose's `environment:` block and python-dotenv is silent if .env absent).
 try:
     from dotenv import load_dotenv  # type: ignore
 
-    _REPO_ROOT = Path(__file__).resolve().parents[3]
     _DOTENV = _REPO_ROOT / ".env"
     if _DOTENV.exists():
         load_dotenv(_DOTENV)
 except Exception:
-    _REPO_ROOT = Path(__file__).resolve().parents[3]
+    pass
 
 
 def _resolve_data_path(raw: str, fallback_name: str) -> str:
