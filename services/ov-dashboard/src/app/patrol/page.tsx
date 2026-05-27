@@ -6,6 +6,7 @@ import { PatrolEditor } from './PatrolEditor';
 import { PatrolControls } from './PatrolControls';
 import { ManualDrive } from './ManualDrive';
 import { AddWaypoint } from './AddWaypoint';
+import { SportPanel } from './SportPanel';
 import { HowItWorks } from './HowItWorks';
 import { WaypointMap } from '@/components/WaypointMap';
 
@@ -63,6 +64,7 @@ export default async function Page() {
           </div>
           <div className="space-y-4">
             <ManualDrive />
+            <SportPanel />
             <AddWaypoint />
           </div>
         </div>

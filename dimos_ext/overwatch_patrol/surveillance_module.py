@@ -104,6 +104,10 @@ class SurveillanceModule(Module):
         # this so `add_waypoint` captures a real robot location rather
         # than the (0, 0, 0) default.
         self._pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        # Full orientation quaternion (x, y, z, w) of the robot body
+        # from /odom — needed for fall detection (computing pitch / roll
+        # / tilt-from-vertical).
+        self._quat: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
         self._odom_thread: Optional[Any] = None
         # Last-seen YOLO track ID per class, used to stabilise
         # detections when the tracker briefly drops a target. See
@@ -139,6 +143,124 @@ class SurveillanceModule(Module):
         self._start_cmd_vel_patrol_thread()
         self._start_detector_thread()
         self._start_core_tick_thread()
+        self._start_fall_recovery_watcher()
+
+    def _start_fall_recovery_watcher(self) -> None:
+        """Detect a fallen robot and call RecoveryStand automatically.
+
+        Approach: derive the world-frame "up" vector projected into the
+        robot body's local Z by rotating (0, 0, 1) through the inverse
+        of the body quaternion. When the robot stands upright that
+        component is ~1.0; when it tips over it drops toward 0 and goes
+        negative if the robot is fully upside-down. We treat <0.6
+        (≈53° tilt) sustained for >2s as a fall, and trigger
+        `execute_sport_command("RecoveryStand")` followed by
+        `BalanceStand` to re-engage active stance.
+
+        A 10s cooldown prevents back-to-back recovery attempts while
+        the robot's still standing back up.
+        """
+        import threading
+        import time
+
+        FALL_TILT_THRESHOLD = 0.6  # cos(angle) below this = tipped
+        FALL_DWELL_S = 2.0
+        RECOVERY_COOLDOWN_S = 10.0
+
+        def _run() -> None:
+            tilted_since: Optional[float] = None
+            last_recovery_at = 0.0
+
+            def call_sport(command: str) -> None:
+                """JSON-RPC into our own MCP server. The MCP server lives
+                in the same process tree at MCP_PORT (default 9990) and
+                exposes `execute_sport_command` from UnitreeSkillContainer.
+                A self-call is the lowest-coupling way to reach across
+                modules from a daemon thread without dragging dimos's
+                module-coordination API into this file.
+                """
+                try:
+                    import urllib.request
+                    import urllib.error
+                    import uuid
+
+                    port = int(os.environ.get("MCP_PORT", "9990"))
+                    body = json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": str(uuid.uuid4()),
+                            "method": "tools/call",
+                            "params": {
+                                "name": "execute_sport_command",
+                                "arguments": {"command_name": command},
+                            },
+                        },
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/mcp",
+                        data=body,
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=4.0) as resp:
+                        text = resp.read().decode("utf-8", "ignore")
+                    log.info(
+                        "surveillance.sport_command_sent",
+                        command=command,
+                        response=text[:200],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "surveillance.sport_command_fail",
+                        command=command,
+                        error=str(e),
+                    )
+
+            log.info("surveillance.fall_watcher_alive")
+            while True:
+                time.sleep(0.5)
+                # Up vector in body frame: R⁻¹ @ (0, 0, 1).
+                # For unit quaternion (x, y, z, w):
+                # body_up_z = 1 - 2*(x² + y²)
+                qx, qy, qz, qw = self._quat
+                if (qx, qy, qz, qw) == (0.0, 0.0, 0.0, 1.0):
+                    # Odom hasn't fired yet, or robot is exactly identity
+                    # (Mujoco may publish yaw-only odom). Skip.
+                    continue
+                body_up_z = 1.0 - 2.0 * (qx * qx + qy * qy)
+
+                now = time.time()
+                if body_up_z < FALL_TILT_THRESHOLD:
+                    if tilted_since is None:
+                        tilted_since = now
+                        log.info(
+                            "surveillance.tilt_detected",
+                            body_up_z=round(body_up_z, 3),
+                        )
+                    elif (
+                        now - tilted_since >= FALL_DWELL_S
+                        and now - last_recovery_at >= RECOVERY_COOLDOWN_S
+                    ):
+                        log.warning(
+                            "surveillance.fall_detected",
+                            body_up_z=round(body_up_z, 3),
+                            dwell_s=round(now - tilted_since, 2),
+                        )
+                        last_recovery_at = now
+                        tilted_since = None
+                        call_sport("RecoveryStand")
+                        time.sleep(2.0)
+                        call_sport("BalanceStand")
+                        log.info("surveillance.recovery_complete")
+                else:
+                    tilted_since = None
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-fall-recovery",
+        ).start()
 
     def _start_core_tick_thread(self) -> None:
         """Drive `core.tick()` at 2Hz.
@@ -457,6 +579,9 @@ class SurveillanceModule(Module):
                     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
                     yaw = math.atan2(siny_cosp, cosy_cosp)
                     self._pose = (float(p.x), float(p.y), float(yaw))
+                    self._quat = (
+                        float(q.x), float(q.y), float(q.z), float(q.w),
+                    )
                     samples["n"] += 1
                     if samples["n"] in (1, 10, 100):
                         log.info(

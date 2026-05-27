@@ -123,6 +123,29 @@ app.post('/halt', requireAuth, async (c) => {
   return c.json({ ok: true, message: r.text });
 });
 
+const SportBody = z.object({
+  command: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^[A-Za-z0-9]+$/, 'alphanumeric only'),
+});
+
+/**
+ * Run a Go2 sport-mode skill. The common ones: RecoveryStand (get up
+ * after a fall), BalanceStand (re-engage active stance), Sit, StandUp,
+ * Stretch, Hello. Spec §13 marks acrobatic ones (Backflip, FrontFlip,
+ * Handstand, Bound, MoonWalk, etc.) as confirmation-required — we
+ * proxy those too here, the confirmation step lives in the Telegram
+ * agent.
+ */
+app.post('/sport', requireAuth, zValidator('json', SportBody), async (c) => {
+  const { command } = c.req.valid('json');
+  const r = await callMcp('execute_sport_command', { command_name: command });
+  if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
+  return c.json({ ok: true, message: r.text });
+});
+
 const AddWaypointBody = z.object({
   name: z
     .string()
