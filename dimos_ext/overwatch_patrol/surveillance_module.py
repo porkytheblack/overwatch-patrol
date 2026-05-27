@@ -13,7 +13,9 @@ Skills exposed (spec §7.1):
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+from typing import Any, Optional
 
 import structlog
 
@@ -52,6 +54,11 @@ class SurveillanceModule(Module):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        # Latest (x, y, yaw) sampled from /odom; `current_pose` reads
+        # this so `add_waypoint` captures a real robot location rather
+        # than the (0, 0, 0) default.
+        self._pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._odom_thread: Optional[Any] = None
         self.core = SurveillanceCore(
             config=SurveillanceCoreConfig(
                 detector_period_s=self.config.detector_period_s,
@@ -61,17 +68,103 @@ class SurveillanceModule(Module):
                 cooldown_seconds=self.config.cooldown_seconds,
             ),
             publish=self._publish_event,
+            current_pose=lambda: self._pose,
         )
+        self._start_odom_listener()
 
     # ------------------------------------------------------------------
-    # Event publishing — currently routes to the structured logger and
-    # any subscribers that monkey-patch `_publish_event`. The blueprint
-    # will wire LCM transports onto these via dimos's `.transports({...})`
-    # convention in a follow-up.
+    # Event publishing.
+    #
+    # SurveillanceCore emits `/ow/*` events (waypoint_sync, robot_state,
+    # incident_opened/closed, detections). The bridge subscribes to those
+    # raw LCM channels (services/ov-bridge/bridge/lcm_listener.py) and
+    # writes to SQLite. We serialise payloads as JSON-encoded
+    # `dimos_lcm.std_msgs.String` messages so the bridge can decode
+    # without any schema coupling.
+    #
+    # We use a raw `lcm.LCM(...)` handle rather than dimos's typed
+    # transport because the bridge isn't a dimos module — keeping the
+    # wire format wire-simple decouples the planes.
     # ------------------------------------------------------------------
+
+    _lc: Optional[Any] = None
+
+    def _start_odom_listener(self) -> None:
+        """Subscribe to `/odom#geometry_msgs.PoseStamped` in a daemon
+        thread so `add_waypoint` captures the live pose.
+
+        We use raw LCM here for the same reason as the publish path —
+        keeping this module decoupled from dimos's typed transport
+        bookkeeping. The pose message carries quaternion orientation; we
+        convert the yaw component on the fly.
+        """
+        import threading
+
+        def _run() -> None:
+            try:
+                import lcm  # type: ignore
+                from dimos_lcm.geometry_msgs.PoseStamped import (  # type: ignore
+                    PoseStamped,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.odom_unavailable", error=str(e))
+                return
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+
+            def _handler(_channel: str, data: bytes) -> None:
+                try:
+                    msg = PoseStamped.decode(data)
+                    p = msg.pose.position
+                    q = msg.pose.orientation
+                    # yaw from quaternion (Z-up). Matches the ROS REP-103
+                    # convention used elsewhere in dimos.
+                    import math
+
+                    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+                    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                    yaw = math.atan2(siny_cosp, cosy_cosp)
+                    self._pose = (float(p.x), float(p.y), float(yaw))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.odom_decode_fail", error=str(e))
+
+            # Match both `/odom` and `/odom#geometry_msgs.PoseStamped`
+            # — dimos's LCMPubSubBase appends the type suffix when
+            # publishing, but other tools use bare channel names.
+            lc.subscribe(r"^/odom(#.*)?$", _handler)
+            log.info("surveillance.odom_subscribed")
+            while True:
+                try:
+                    lc.handle_timeout(200)
+                except Exception:  # noqa: BLE001
+                    return
+
+        self._odom_thread = threading.Thread(
+            target=_run, daemon=True, name="surveillance-odom",
+        )
+        self._odom_thread.start()
 
     def _publish_event(self, topic: str, payload: dict) -> None:
         log.debug("surveillance.event", topic=topic, type=payload.get("type"))
+        try:
+            if self._lc is None:
+                import lcm  # type: ignore
+
+                self._lc = lcm.LCM(
+                    os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+                )
+            from dimos_lcm.std_msgs.String import String  # type: ignore
+
+            msg = String(data=json.dumps(payload, separators=(",", ":")))
+            self._lc.publish(topic, msg.lcm_encode())
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "surveillance.publish_fail",
+                topic=topic,
+                error=str(e),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
