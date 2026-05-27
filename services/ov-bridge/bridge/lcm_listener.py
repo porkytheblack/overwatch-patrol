@@ -28,7 +28,13 @@ OW_TOPICS = (
     "/ow/waypoint_sync",
 )
 
-IMAGE_TOPIC = "/color_image"
+# dimos's `LCMPubSubBase.subscribe` derives the LCM channel from
+# `Topic(topic, lcm_type)` as `{topic}#{type.msg_name}`. So when the
+# blueprint composes `JpegLcmTransport("/color_image", Image)`, frames
+# land on `/color_image#sensor_msgs.Image` — and a raw subscription to
+# `/color_image` matches nothing. We use a regex that catches both the
+# bare and the type-suffixed forms.
+IMAGE_TOPIC_REGEX = r"^/color_image(#.*)?$"
 
 
 class LcmListener:
@@ -104,8 +110,8 @@ class LcmListener:
                 jpeg = bytes(msg.data[: msg.data_length])
                 frames.publish_threadsafe(jpeg, loop)
 
-            lc.subscribe(IMAGE_TOPIC, _image_handler)
-            log.info("lcm.subscribed_image", topic=IMAGE_TOPIC)
+            lc.subscribe(IMAGE_TOPIC_REGEX, _image_handler)
+            log.info("lcm.subscribed_image", topic=IMAGE_TOPIC_REGEX)
 
         log.info("lcm.subscribed", topics=OW_TOPICS, url=self.url)
 
