@@ -1,4 +1,5 @@
 import { Shell } from '@/components/Shell';
+import { SettingsTabs } from '@/components/SettingsTabs';
 import { apiFetch } from '@/lib/api';
 import { redirect } from 'next/navigation';
 import { TelegramForm } from './TelegramForm';
@@ -38,6 +39,7 @@ export default async function Page() {
   return (
     <Shell>
       <div className="p-4 max-w-3xl space-y-6">
+        <SettingsTabs />
         <section>
           <h2 className="mono uppercase text-sm tracking-[0.04em] mb-3">TELEGRAM</h2>
           <TelegramForm enabled={bot.enabled} tokenSet={bot.config?.bot_token_set ?? false} />
