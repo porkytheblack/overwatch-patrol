@@ -182,8 +182,8 @@ export async function handleMessage(handle: string, text: string): Promise<strin
     state.pending_confirmation = null;
   }
 
-  if (!ENV.ANTHROPIC_API_KEY) {
-    return 'agent offline · ANTHROPIC_API_KEY not set';
+  if (!ENV.AGENT) {
+    return 'agent offline · no provider configured (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)';
   }
 
   state.messages.push({ role: 'user', content: text });
@@ -198,12 +198,18 @@ export async function handleMessage(handle: string, text: string): Promise<strin
 
   let confirmationCaptured: { tool: string; args: Record<string, unknown> } | null = null;
 
+  log.info('agent.boot', {
+    handle,
+    provider: ENV.AGENT.provider,
+    model: ENV.AGENT.model,
+  });
+
   const glove = new Glove({
     store,
     model: createAdapter({
-      provider: 'anthropic',
-      model: ENV.MODEL,
-      apiKey: ENV.ANTHROPIC_API_KEY,
+      provider: ENV.AGENT.provider,
+      model: ENV.AGENT.model,
+      apiKey: ENV.AGENT.apiKey,
       stream: true,
     }),
     displayManager: new Displaymanager(),
