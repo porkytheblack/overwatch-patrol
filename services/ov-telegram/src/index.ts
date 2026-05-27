@@ -89,6 +89,32 @@ function isStartCommand(text: string): boolean {
   return /^\/start(@\S+)?(\s|$)/i.test(text);
 }
 
+/**
+ * Run `fn` while pulsing the Telegram "typing…" chat action so the operator
+ * sees the bot is doing work rather than staring at an unanswered message.
+ *
+ * Telegram's typing indicator auto-expires ~5s after the last `sendChatAction`,
+ * so we fire one immediately and then again every 4s until `fn` resolves or
+ * throws. Failures from `sendChatAction` (rate limit, network blip) are
+ * swallowed — the indicator is cosmetic; we don't want to mask the real
+ * error from `fn`.
+ */
+async function withTyping<T>(
+  b: TelegramBot,
+  chat_id: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const send = () =>
+    b.sendChatAction(chat_id, 'typing').catch(() => undefined);
+  void send();
+  const interval = setInterval(send, 4000);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
 async function handleStart(b: TelegramBot, chat_id: string, chat_handle: string | null) {
   // Best-effort GC so the table stays small.
   try {
@@ -130,7 +156,9 @@ function start(token: string) {
 
     if (isStartCommand(msg.text)) {
       try {
-        await handleStart(bot!, chat_id, chat_handle);
+        await withTyping(bot!, chat_id, () =>
+          handleStart(bot!, chat_id, chat_handle),
+        );
       } catch (e) {
         log.error('tg.start_error', { error: String(e) });
         await bot!
@@ -142,7 +170,11 @@ function start(token: string) {
 
     log.info('tg.message', { chat_id, text: msg.text.slice(0, 120) });
     try {
-      const reply = await handleMessage(chat_id, msg.text);
+      // Pulse "typing…" the whole time the agent is composing — LLM round-
+      // trips + MCP tool calls can take several seconds.
+      const reply = await withTyping(bot!, chat_id, () =>
+        handleMessage(chat_id, msg.text!),
+      );
       await bot!.sendMessage(chat_id, reply);
     } catch (e) {
       log.error('tg.error', { error: String(e) });
