@@ -178,8 +178,28 @@ def main() -> None:
     # "later wins", so `unitree_go2`'s pSHMTransport (on Mac) would silently
     # clobber the JPEG-over-LCM override and our bridge would never see
     # `/color_image` frames.
+    # Override GO2Connection's mode to RAGE. This is the canonical dimos
+    # pattern (see dimos/robot/unitree/go2/blueprints/basic/
+    # unitree_go2_webrtc_rage_keyboard_teleop.py) for enabling joystick
+    # walking via the WebRTC channel. In RAGE mode, GO2Connection.start()
+    # calls enable_rage_mode() which fires the two sport commands the
+    # dog actually needs:
+    #
+    #   1. api_id 2059 ({"data": True})    — rage toggle, uncaps motion
+    #   2. SwitchJoystick (1027, {"data": True}) — flips WIRELESS_CONTROLLER
+    #      interpretation from "body posture" to "walking direction"
+    #
+    # Without RAGE mode, the dog is in BalanceStand where the left
+    # stick adjusts body height/pitch instead of walking. Symptom:
+    # pressing W on the dashboard lifts the body up; S lowers it.
+    #
+    # autoconnect's "later wins" rule on module identity means this
+    # second GO2Connection.blueprint replaces the default-mode one from
+    # `_with_jpeglcm`. The JpegLcmTransport from _with_jpeglcm survives
+    # because we don't override the transport_map here.
     go2_overwatch = autoconnect(
         _with_jpeglcm,
+        GO2Connection.blueprint(mode="rage"),
         # In-memory stub satisfies the SpatialMemorySpec that
         # NavigationSkillContainer requires, without needing CLIP / ChromaDB
         # (which require a CUDA GPU and a writable assets dir).

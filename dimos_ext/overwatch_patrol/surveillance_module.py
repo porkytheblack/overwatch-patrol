@@ -178,7 +178,10 @@ class SurveillanceModule(Module):
         self._start_core_tick_thread()
         self._start_fall_recovery_watcher()
         self._start_sport_request_listener()
-        self._start_walk_mode_primer()
+        # Walk-mode toggle is now handled by GO2Connection itself —
+        # the blueprint composes it with mode="rage" so dimos fires
+        # rage_mode + SwitchJoystick during connection.start(). No
+        # post-init primer needed; see go2_overwatch blueprint.
 
     def _start_fall_recovery_watcher(self) -> None:
         """Detect a fallen robot and call RecoveryStand automatically.

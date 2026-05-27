@@ -47,10 +47,17 @@ const KEY_MAP: Record<string, Dir> = {
 // robot doesn't auto-stop mid-stroke when a single packet is delayed
 // over the cellular relay. 50 ms (20 Hz) gives 4 in-flight commands
 // before any timeout, matches the Unitree controller's typical rate.
+//
+// Linear/angular magnitudes match dimos's reference WebRTC rage
+// keyboard teleop (`unitree_go2_webrtc_rage_keyboard_teleop.py` →
+// `KeyboardTeleop.blueprint(linear_speed=1.25, angular_speed=1.2)`).
+// The dog has a deadzone on joystick walking; anything below ~0.5 m/s
+// won't engage the gait. 0.4 m/s (our previous value) was inside that
+// deadzone, hence the dog stayed stationary even with rage mode on.
 const TICK_MS = 50;
-const LINEAR_SPEED = 0.4; // m/s — dimos KeyboardTeleop default
-const ANGULAR_SPEED = 0.8; // rad/s
-const SPRINT_MULT = 1.6;
+const LINEAR_SPEED = 1.0; // m/s
+const ANGULAR_SPEED = 1.0; // rad/s
+const SPRINT_MULT = 1.25;
 
 export function ManualDrive() {
   const { online } = useLiveStatus();
