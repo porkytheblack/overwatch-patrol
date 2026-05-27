@@ -4,19 +4,24 @@ version = "0.1.0"
 description = "Overwatch Patrol dimos extension: surveillance module, waypoint router, clip recorder, query module."
 requires-python = ">=3.11"
 dependencies = [
-  "pydantic>=2.9",
+  # dimos itself, installed from PyPI with the quadruped + base extras
+  # (drone / humanoid / sim extras are opt-in below).
+  "dimos[base,unitree]>=0.1",
   "ultralytics>=8.3",
   "opencv-python>=4.10",
   "ffmpeg-python>=0.2",
+  "pydantic>=2.9",
   "structlog>=24.4",
 ]
 
 [project.optional-dependencies]
-# `dimos` itself is provided via vendor/dimos (editable install in make setup).
+# `make sim` install path — pulls Mujoco backend for the Go2.
+sim = ["dimos[base,unitree,sim]>=0.1"]
+# Drone blueprint path (optional).
+drone = ["dimos[base,drone]>=0.1"]
+# Humanoid blueprint path (optional).
+humanoid = ["dimos[base,unitree,sim]>=0.1"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
-
-[tool.uv.sources]
-dimos = { path = "../vendor/dimos", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

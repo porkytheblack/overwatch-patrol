@@ -1,12 +1,16 @@
-.PHONY: setup robot sim dev down logs seed reset codegen migrate e2e link-dimos unlink-dimos
+.PHONY: setup setup-sim robot sim dev down logs seed reset codegen migrate e2e dev-dimos
 
 SVC ?=
 
+# ---- Python ---------------------------------------------------------------
+
 setup:
-	@echo "▸ installing dimos (editable, from submodule)"
-	@if [ -d vendor/dimos ]; then uv pip install -e ./vendor/dimos; else echo "  vendor/dimos missing — clone with --recurse-submodules"; fi
+	@echo "▸ creating uv venv (Python 3.12)"
+	@uv venv --python "3.12" || true
+	@echo "▸ installing dimos[base,unitree] from PyPI"
+	uv pip install 'dimos[base,unitree]'
 	@echo "▸ installing dimos_ext (editable)"
-	@uv pip install -e ./dimos_ext || true
+	uv pip install -e ./dimos_ext
 	@echo "▸ installing TS workspaces"
 	pnpm install
 	@echo "▸ codegen Pydantic events from zod"
@@ -15,11 +19,31 @@ setup:
 	pnpm -F @overwatch/api migrate
 	@echo "✓ setup complete"
 
+setup-sim:
+	@echo "▸ creating uv venv (Python 3.12)"
+	@uv venv --python "3.12" || true
+	@echo "▸ installing dimos[base,unitree,sim] (Mujoco backend)"
+	uv pip install 'dimos[base,unitree,sim]'
+	uv pip install -e ./dimos_ext[sim]
+	pnpm install
+	pnpm -F @overwatch/schemas codegen
+	pnpm -F @overwatch/api migrate
+	@echo "✓ sim setup complete"
+
+# Develop dimos and overwatch-patrol side-by-side (editable install of a
+# local checkout). Usage: `make dev-dimos DIMOS_PATH=../dimos`
+dev-dimos:
+	@test -n "$(DIMOS_PATH)" || (echo "usage: make dev-dimos DIMOS_PATH=../dimos" && exit 1)
+	uv pip install -e $(DIMOS_PATH)
+	@echo "✓ dimos editable from $(DIMOS_PATH)"
+
 robot:
 	python -m overwatch_patrol.blueprints.go2_overwatch
 
 sim:
 	OV_SIM=1 python -m overwatch_patrol.blueprints.go2_overwatch
+
+# ---- App plane ------------------------------------------------------------
 
 dev:
 	docker compose up -d --build
@@ -49,13 +73,3 @@ migrate:
 
 e2e:
 	bash ./scripts/e2e.sh
-
-link-dimos:
-	@test -n "$(DIMOS_PATH)" || (echo "usage: make link-dimos DIMOS_PATH=../dimos" && exit 1)
-	rm -rf vendor/dimos
-	ln -s $(DIMOS_PATH) vendor/dimos
-	@echo "✓ vendor/dimos → $(DIMOS_PATH)"
-
-unlink-dimos:
-	@test -L vendor/dimos && rm vendor/dimos && git submodule update --init vendor/dimos || true
-	@echo "✓ vendor/dimos restored to submodule"

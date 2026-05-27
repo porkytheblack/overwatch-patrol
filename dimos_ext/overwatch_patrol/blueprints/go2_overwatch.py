@@ -33,7 +33,8 @@ def main() -> None:
         from dimos.robot.unitree.go2.connection import GO2Connection
     except ImportError as e:
         sys.stderr.write(
-            "dimos imports failed — make sure `vendor/dimos` is present and `make setup` ran.\n"
+            "dimos imports failed — install with: `uv pip install 'dimos[base,unitree]'`\n"
+            "or run `make setup`.\n"
             f"  underlying error: {e}\n"
         )
         sys.exit(1)

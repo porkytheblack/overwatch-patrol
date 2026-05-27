@@ -40,8 +40,12 @@ services:
       SQLITE_PATH: /data/overwatch.db
       BRIDGE_WS_URL: ${BRIDGE_WS_URL:-ws://host.docker.internal:7001/events}
       MCP_URL: ${MCP_URL:-http://host.docker.internal:9990/mcp}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      MODEL: ${MODEL:-claude-sonnet-4-6}
+      PROVIDER: ${PROVIDER:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MODEL: ${MODEL:-}
       DASHBOARD_BASE_URL: ${DASHBOARD_BASE_URL:-http://localhost:3001}
       DEEP_LINK_SECRET: ${DEEP_LINK_SECRET}
       OV_API_URL: http://ov-api:3000
