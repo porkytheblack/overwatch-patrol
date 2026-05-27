@@ -105,6 +105,10 @@ class SurveillanceModule(Module):
         # than the (0, 0, 0) default.
         self._pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._odom_thread: Optional[Any] = None
+        # Last-seen YOLO track ID per class, used to stabilise
+        # detections when the tracker briefly drops a target. See
+        # _start_detector_thread.
+        self._track_id_by_class: dict[int, str] = {}
         # Set in main(); used by handle_goal_reached + the patrol loop.
         self._goal_reached_event: Optional[asyncio.Event] = None
         self._supervisor_task: Optional[asyncio.Task[None]] = None
@@ -134,6 +138,30 @@ class SurveillanceModule(Module):
         self._start_odom_listener()
         self._start_cmd_vel_patrol_thread()
         self._start_detector_thread()
+        self._start_core_tick_thread()
+
+    def _start_core_tick_thread(self) -> None:
+        """Drive `core.tick()` at 2Hz.
+
+        SurveillanceCore relies on a periodic tick to expire timers —
+        inspection_timeout_seconds, cooldown_seconds, manual_override
+        idle. Without this loop the state machine gets stuck the first
+        time it enters INSPECTING / COOLDOWN / MANUAL_OVERRIDE.
+        """
+        import threading
+        import time
+
+        def _run() -> None:
+            while True:
+                try:
+                    self.core.tick()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.tick_fail", error=str(e))
+                time.sleep(0.5)
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-core-tick",
+        ).start()
 
     # ------------------------------------------------------------------
     # Detector
@@ -271,11 +299,17 @@ class SurveillanceModule(Module):
                             conf = float(box.conf[0])
                             cls_id = int(box.cls[0])
                             track_id_raw = getattr(box, "id", None)
-                            track_id = (
-                                f"t{int(track_id_raw[0])}"
-                                if track_id_raw is not None
-                                else None
-                            )
+                            if track_id_raw is not None:
+                                track_id = f"t{int(track_id_raw[0])}"
+                                # Cache last-seen ID per class so a
+                                # frame where YOLO drops the tracker
+                                # (returns None) doesn't fork into a
+                                # second LingerTracker entry — that
+                                # was making linger time unreliable
+                                # and causing premature suppression.
+                                self._track_id_by_class[cls_id] = track_id
+                            else:
+                                track_id = self._track_id_by_class.get(cls_id)
                         except Exception:  # noqa: BLE001
                             continue
                         cx, cy, w_, h_ = xywh
