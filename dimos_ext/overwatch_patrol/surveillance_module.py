@@ -114,9 +114,11 @@ class SurveillanceModule(Module):
                 os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
             )
 
+            samples = {"n": 0}
+
             def _handler(_channel: str, data: bytes) -> None:
                 try:
-                    msg = PoseStamped.decode(data)
+                    msg = PoseStamped.lcm_decode(data)
                     p = msg.pose.position
                     q = msg.pose.orientation
                     # yaw from quaternion (Z-up). Matches the ROS REP-103
@@ -127,6 +129,15 @@ class SurveillanceModule(Module):
                     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
                     yaw = math.atan2(siny_cosp, cosy_cosp)
                     self._pose = (float(p.x), float(p.y), float(yaw))
+                    samples["n"] += 1
+                    if samples["n"] in (1, 10, 100):
+                        log.info(
+                            "surveillance.odom_sample",
+                            count=samples["n"],
+                            x=round(self._pose[0], 3),
+                            y=round(self._pose[1], 3),
+                            yaw=round(self._pose[2], 3),
+                        )
                 except Exception as e:  # noqa: BLE001
                     log.warning("surveillance.odom_decode_fail", error=str(e))
 
