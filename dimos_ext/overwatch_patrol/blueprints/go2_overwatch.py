@@ -74,6 +74,7 @@ def main() -> None:
 
     from overwatch_patrol.clip_recorder import ClipRecorderModule
     from overwatch_patrol.query_module import SurveillanceQueryModule
+    from overwatch_patrol.spatial_memory_stub import SpatialMemoryStub
     from overwatch_patrol.surveillance_module import SurveillanceModule
 
     sqlite_path = os.environ.get("SQLITE_PATH", "/data/overwatch.db")
@@ -82,6 +83,10 @@ def main() -> None:
     go2_overwatch = autoconnect(
         _with_jpeglcm,
         unitree_go2,
+        # In-memory stub satisfies the SpatialMemorySpec that
+        # NavigationSkillContainer requires, without needing CLIP / ChromaDB
+        # (which require a CUDA GPU and a writable assets dir).
+        SpatialMemoryStub.blueprint(),
         SurveillanceModule.blueprint(camera_info=GO2Connection.camera_info_static),
         ClipRecorderModule.blueprint(output_dir=clip_dir),
         SurveillanceQueryModule.blueprint(sqlite_path=sqlite_path),
