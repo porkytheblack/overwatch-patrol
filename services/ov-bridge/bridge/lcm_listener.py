@@ -95,7 +95,7 @@ class LcmListener:
         def _make_ow_handler(topic: str):
             def _handler(_channel: str, data: bytes) -> None:
                 try:
-                    msg = String.decode(data)
+                    msg = String.lcm_decode(data)
                     payload = json.loads(msg.data)
                 except Exception as e:  # noqa: BLE001
                     log.warning("lcm.decode_fail", topic=topic, error=str(e))
