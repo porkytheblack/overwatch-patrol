@@ -73,17 +73,21 @@ def load_dotenv_if_any() -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def resolve_ip() -> str:
-    if len(sys.argv) > 1:
-        return sys.argv[1]
+def resolve_ip() -> tuple[str, bool]:
+    """Returns (ip, walk_test_flag)."""
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    walk = "--walk" in flags
+    if args:
+        return args[0], walk
     load_dotenv_if_any()
     ip = os.environ.get("ROBOT_IP")
     if not ip:
         fail(
             "no ROBOT_IP",
-            "usage: robot_ping.py <ip>   (or set ROBOT_IP in .env)",
+            "usage: robot_ping.py <ip> [--walk]   (or set ROBOT_IP in .env)",
         )
-    return ip
+    return ip, walk
 
 
 def ping(ip: str) -> None:
@@ -186,33 +190,78 @@ def webrtc_connect(ip: str):
     return conn, captured
 
 
-def send_command(conn, cmd_name: str, cmd_id: int) -> None:
-    step(f"sending {cmd_name} (sport id={cmd_id})")
+def send_command(
+    conn, cmd_name: str, cmd_id: int, parameter: dict | None = None,
+) -> None:
+    label = cmd_name if parameter is None else f"{cmd_name}({parameter})"
+    step(f"sending {label} (sport id={cmd_id})")
     try:
         from unitree_webrtc_connect.constants import RTC_TOPIC
 
-        result = conn.publish_request(
-            RTC_TOPIC["SPORT_MOD"], {"api_id": cmd_id},
-        )
+        body: dict = {"api_id": cmd_id}
+        if parameter is not None:
+            body["parameter"] = parameter
+        result = conn.publish_request(RTC_TOPIC["SPORT_MOD"], body)
     except Exception as e:
         fail(
-            f"{cmd_name} threw: {e}",
+            f"{label} threw: {e}",
             "the data channel was open but the request didn't land. "
             "Power-cycle the dog and retry.",
         )
     if not result:
         fail(
-            f"{cmd_name} returned False",
+            f"{label} returned False",
             "dog received the request but rejected it. Most likely it's "
             "damped / on its side. Stand it up manually then retry.",
         )
-    ok(f"{cmd_name} ack'd")
+    ok(f"{label} ack'd")
+
+
+def walk_test(conn) -> None:
+    """Run the dimos `enable_rage_mode` sequence then push joystick
+    forward for 2 s. If the dog steps forward you've confirmed the
+    full walk path (rage + SwitchJoystick + WIRELESS_CONTROLLER) is
+    working — independent of the bridge / api / dashboard pipeline.
+    """
+    import asyncio
+
+    step("priming walk mode (BalanceStand → RageMode → SwitchJoystick)")
+    send_command(conn, "BalanceStand", 1002)
+    time.sleep(1.5)
+    send_command(conn, "RageMode", 2059, parameter={"data": True})
+    time.sleep(2.0)
+    send_command(conn, "SwitchJoystick", 1027, parameter={"data": True})
+    time.sleep(1.0)
+
+    step("driving forward for 2 s via WIRELESS_CONTROLLER (lx=0, ly=0.5)…")
+    try:
+        from unitree_webrtc_connect.constants import RTC_TOPIC
+
+        async def drive() -> None:
+            end = time.time() + 2.0
+            while time.time() < end:
+                conn.conn.datachannel.pub_sub.publish_without_callback(
+                    RTC_TOPIC["WIRELESS_CONTROLLER"],
+                    data={"lx": 0.0, "ly": 0.5, "rx": 0.0, "ry": 0.0},
+                )
+                await asyncio.sleep(0.05)  # 20 Hz
+            # Explicit stop
+            conn.conn.datachannel.pub_sub.publish_without_callback(
+                RTC_TOPIC["WIRELESS_CONTROLLER"],
+                data={"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0},
+            )
+
+        fut = asyncio.run_coroutine_threadsafe(drive(), conn.loop)
+        fut.result(timeout=5.0)
+    except Exception as e:
+        fail(f"walk burst threw: {e}")
+    ok("walk burst complete — did the dog step forward?")
 
 
 def main() -> None:
-    ip = resolve_ip()
+    ip, walk = resolve_ip()
     print()
-    print(f"  {BOLD}robot_ping → {ip}{RESET}")
+    print(f"  {BOLD}robot_ping → {ip}{RESET}{' (with --walk test)' if walk else ''}")
     print()
 
     ping(ip)
@@ -227,10 +276,18 @@ def main() -> None:
     time.sleep(2)
     send_command(conn, "Hello", 1016)
 
+    if walk:
+        time.sleep(2)
+        walk_test(conn)
+
     print()
     print(f"{GREEN}{BOLD}==========================================={RESET}")
     print(f"{GREEN}{BOLD}  ✓ all good — your dog is reachable.{RESET}")
-    print(f"{GREEN}{BOLD}    Did you see it stand and wave?{RESET}")
+    if walk:
+        print(f"{GREEN}{BOLD}    Did you see it stand, wave, and step?{RESET}")
+    else:
+        print(f"{GREEN}{BOLD}    Did you see it stand and wave?{RESET}")
+        print(f"{DIM}    (add --walk to also test the walk pipeline){RESET}")
     print(f"{GREEN}{BOLD}==========================================={RESET}")
     print()
 

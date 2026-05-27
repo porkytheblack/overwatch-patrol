@@ -41,10 +41,13 @@ const KEY_MAP: Record<string, Dir> = {
   ArrowRight: 'rotR',
 };
 
-// Velocity teleop: publish a Twist every TICK_MS while held. Has to be
-// well under Go2's cmd_vel_timeout (200 ms) so the robot doesn't
-// repeatedly auto-stop mid-motion.
-const TICK_MS = 100;
+// Velocity teleop: publish a Twist every TICK_MS while held.
+//
+// Has to be comfortably under Go2's cmd_vel_timeout (200 ms) so the
+// robot doesn't auto-stop mid-stroke when a single packet is delayed
+// over the cellular relay. 50 ms (20 Hz) gives 4 in-flight commands
+// before any timeout, matches the Unitree controller's typical rate.
+const TICK_MS = 50;
 const LINEAR_SPEED = 0.4; // m/s — dimos KeyboardTeleop default
 const ANGULAR_SPEED = 0.8; // rad/s
 const SPRINT_MULT = 1.6;

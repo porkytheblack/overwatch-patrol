@@ -284,6 +284,19 @@ class SurveillanceModule(Module):
         if api_id is None:
             log.warning("surveillance.sport_unknown", command=command)
             return False
+        return self._fire_sport_api_id(api_id, parameter, label=command)
+
+    def _fire_sport_api_id(
+        self,
+        api_id: int,
+        parameter: Optional[dict[str, Any]] = None,
+        label: str = "",
+    ) -> bool:
+        """Lower-level variant for sport api_ids that aren't in our
+        `_SPORT_COMMANDS` map — e.g. the rage-mode toggle (2059) which
+        doesn't have a stable string name in the dimos constants but
+        is required to enable joystick walking.
+        """
         request: dict[str, Any] = {"api_id": api_id}
         if parameter is not None:
             request["parameter"] = parameter
@@ -291,14 +304,16 @@ class SurveillanceModule(Module):
             self._connection.publish_request(_SPORT_MOD_TOPIC, request)
             log.info(
                 "surveillance.sport_sent",
-                command=command,
+                command=label or str(api_id),
                 api_id=api_id,
                 parameter=parameter,
             )
             return True
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "surveillance.sport_fail", command=command, error=str(e),
+                "surveillance.sport_fail",
+                command=label or str(api_id),
+                error=str(e),
             )
             return False
 
@@ -372,16 +387,22 @@ class SurveillanceModule(Module):
             # does StandUp + BalanceStand at ~T+3s; we want to be
             # comfortably after that so our sport commands don't race.
             time.sleep(8)
-            steps = [
-                ("BalanceStand", None),
-                ("FreeWalk", None),
-                ("SwitchJoystick", {"data": True}),
-            ]
-            for cmd, param in steps:
-                if self._fire_sport_command(cmd, parameter=param):
-                    time.sleep(1.5)
-                else:
-                    log.warning("surveillance.walk_mode_step_failed", step=cmd)
+            # Mirror exactly what dimos's enable_rage_mode does — the
+            # only documented sequence in dimos that actually makes the
+            # joystick walk the dog:
+            #   1. api_id 2059 (rage mode toggle)   → uncaps motion
+            #   2. SwitchJoystick(data=True) 1027   → joystick = walking
+            # Without (1), (2) on its own sometimes works but is
+            # inconsistent across firmware versions.
+            self._fire_sport_command("BalanceStand")
+            time.sleep(1.5)
+            self._fire_sport_api_id(
+                2059, parameter={"data": True}, label="RageMode",
+            )
+            time.sleep(2.0)
+            self._fire_sport_command(
+                "SwitchJoystick", parameter={"data": True},
+            )
             log.info("surveillance.walk_mode_primed")
 
         threading.Thread(
