@@ -1,4 +1,4 @@
-.PHONY: setup setup-sim ensure-env check-git-lfs robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos
+.PHONY: setup setup-sim ensure-env check-git-lfs robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos mac-multicast-route
 
 SVC ?=
 
@@ -85,6 +85,22 @@ robot:
 
 sim:
 	OV_SIM=1 python -m overwatch_patrol.blueprints.go2_overwatch
+
+# macOS only — LCM publishes JPEG frames to multicast group 239.255.76.67
+# (ttl=1). Without an explicit loopback route, packets between two
+# processes on the same Mac get dropped and ov-bridge never sees video.
+# Not persistent across reboots — rerun if frames stop after a restart.
+mac-multicast-route:
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "✗ mac-multicast-route is macOS-only"; exit 1; \
+	fi
+	@if netstat -nr | grep -q 239.255.76.67; then \
+		echo "✓ multicast route already present"; \
+	else \
+		echo "▸ adding loopback route for LCM multicast (will prompt for sudo)"; \
+		sudo route -nv add -net 239.255.76.67 -interface lo0; \
+		echo "✓ route added (lost on reboot — rerun \`make mac-multicast-route\`)"; \
+	fi
 
 # ---- App plane ------------------------------------------------------------
 

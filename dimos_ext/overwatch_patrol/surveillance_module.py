@@ -30,7 +30,33 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.navigation.replanning_a_star.module_spec import (
     ReplanningAStarPlannerSpec,
 )
+from dimos.robot.unitree.go2.connection_spec import GO2ConnectionSpec
 from dimos_lcm.std_msgs import Bool
+
+
+# Sport commands we expose via the LCM bypass path. Keys match the
+# dashboard's SportPanel labels and the Telegram bot's
+# `execute_sport_command(command_name=…)` argument verbatim.
+_SPORT_COMMANDS: dict[str, int] = {
+    "Damp": 1001,
+    "BalanceStand": 1002,
+    "StopMove": 1003,
+    "StandUp": 1004,
+    "StandDown": 1005,
+    "RecoveryStand": 1006,
+    "Move": 1008,
+    "Sit": 1009,
+    "RiseSit": 1010,
+    "Hello": 1016,
+    "Stretch": 1017,
+    # SwitchJoystick is what actually enables walking via the
+    # WIRELESS_CONTROLLER channel. Without it the dog interprets stick
+    # inputs as body posture (W lifts body, S lowers). Send with
+    # parameter={"data": True}.
+    "SwitchJoystick": 1027,
+    "FreeWalk": 1045,
+}
+_SPORT_MOD_TOPIC = "rt/api/sport/request"  # RTC_TOPIC["SPORT_MOD"] value
 
 from .state_machine import State
 from .surveillance_core import (
@@ -97,6 +123,13 @@ class SurveillanceModule(Module):
     goal_request: Out[PoseStamped]
     goal_reached: In[Bool]
     _planner_spec: ReplanningAStarPlannerSpec
+    # GO2 WebRTC connection — same Spec UnitreeSkillContainer uses.
+    # Lets us fire sport commands (FreeWalk, Hello, RecoveryStand,
+    # etc.) without going through the MCP RPC backplane, which on the
+    # 4G cellular relay path can hang for 120s. The LCM bypass path
+    # (sport_request subscriber → publish_request) is what powers the
+    # dashboard's SportPanel and the auto-recovery watcher.
+    _connection: GO2ConnectionSpec
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -144,6 +177,8 @@ class SurveillanceModule(Module):
         self._start_detector_thread()
         self._start_core_tick_thread()
         self._start_fall_recovery_watcher()
+        self._start_sport_request_listener()
+        self._start_walk_mode_primer()
 
     def _start_fall_recovery_watcher(self) -> None:
         """Detect a fallen robot and call RecoveryStand automatically.
@@ -170,54 +205,6 @@ class SurveillanceModule(Module):
         def _run() -> None:
             tilted_since: Optional[float] = None
             last_recovery_at = 0.0
-
-            def call_sport(command: str) -> None:
-                """JSON-RPC into our own MCP server. The MCP server lives
-                in the same process tree at MCP_PORT (default 9990) and
-                exposes `execute_sport_command` from UnitreeSkillContainer.
-                A self-call is the lowest-coupling way to reach across
-                modules from a daemon thread without dragging dimos's
-                module-coordination API into this file.
-                """
-                try:
-                    import urllib.request
-                    import urllib.error
-                    import uuid
-
-                    port = int(os.environ.get("MCP_PORT", "9990"))
-                    body = json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": str(uuid.uuid4()),
-                            "method": "tools/call",
-                            "params": {
-                                "name": "execute_sport_command",
-                                "arguments": {"command_name": command},
-                            },
-                        },
-                    ).encode("utf-8")
-                    req = urllib.request.Request(
-                        f"http://127.0.0.1:{port}/mcp",
-                        data=body,
-                        method="POST",
-                        headers={
-                            "Content-Type": "application/json",
-                            "Accept": "application/json, text/event-stream",
-                        },
-                    )
-                    with urllib.request.urlopen(req, timeout=4.0) as resp:
-                        text = resp.read().decode("utf-8", "ignore")
-                    log.info(
-                        "surveillance.sport_command_sent",
-                        command=command,
-                        response=text[:200],
-                    )
-                except Exception as e:  # noqa: BLE001
-                    log.warning(
-                        "surveillance.sport_command_fail",
-                        command=command,
-                        error=str(e),
-                    )
 
             log.info("surveillance.fall_watcher_alive")
             while True:
@@ -251,15 +238,154 @@ class SurveillanceModule(Module):
                         )
                         last_recovery_at = now
                         tilted_since = None
-                        call_sport("RecoveryStand")
+                        self._fire_sport_command("RecoveryStand")
                         time.sleep(2.0)
-                        call_sport("BalanceStand")
+                        self._fire_sport_command("BalanceStand")
                         log.info("surveillance.recovery_complete")
                 else:
                     tilted_since = None
 
         threading.Thread(
             target=_run, daemon=True, name="surveillance-fall-recovery",
+        ).start()
+
+    # ------------------------------------------------------------------
+    # Sport-command bypass path.
+    #
+    # MCP `tools/call execute_sport_command(...)` works in principle but
+    # the dimos RPC backplane on the 4G relay can hang the dispatch for
+    # 120s. The dashboard's SportPanel and the auto-recovery watcher
+    # need millisecond response, so we route sport commands over LCM
+    # instead:
+    #
+    #   dashboard → ov-api → bridge → LCM `/ow/sport_request` (String JSON)
+    #     → SurveillanceModule (here) → self._connection.publish_request
+    #     → GO2Connection → WebRTC → robot.
+    #
+    # The slow MCP hops disappear; the only cross-worker call left is
+    # SurveillanceModule → GO2Connection via the GO2ConnectionSpec Spec
+    # injection, which dimos resolves locally.
+    # ------------------------------------------------------------------
+
+    def _fire_sport_command(
+        self,
+        command: str,
+        parameter: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Send a Go2 sport command via the WebRTC channel.
+
+        Some commands need a `parameter` payload — most notably
+        `SwitchJoystick(data=True)` which actually enables walking via
+        WIRELESS_CONTROLLER. Without parameters, sends just the api_id.
+
+        Returns True on success — failures get logged and swallowed.
+        """
+        api_id = _SPORT_COMMANDS.get(command)
+        if api_id is None:
+            log.warning("surveillance.sport_unknown", command=command)
+            return False
+        request: dict[str, Any] = {"api_id": api_id}
+        if parameter is not None:
+            request["parameter"] = parameter
+        try:
+            self._connection.publish_request(_SPORT_MOD_TOPIC, request)
+            log.info(
+                "surveillance.sport_sent",
+                command=command,
+                api_id=api_id,
+                parameter=parameter,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "surveillance.sport_fail", command=command, error=str(e),
+            )
+            return False
+
+    def _start_sport_request_listener(self) -> None:
+        """Subscribe to `/ow/sport_request` LCM events and fire them
+        as sport commands. Payload: `{"command": "Hello"}` (or
+        FreeWalk / BalanceStand / RecoveryStand / etc.).
+        """
+        import threading
+
+        def _run() -> None:
+            try:
+                import lcm  # type: ignore
+                from dimos_lcm.std_msgs.String import String  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.sport_lcm_missing", error=str(e))
+                return
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+
+            def _handler(_ch: str, data: bytes) -> None:
+                try:
+                    msg = String.lcm_decode(data)
+                    payload = json.loads(msg.data)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.sport_decode_fail", error=str(e))
+                    return
+                cmd = str(payload.get("command", "")).strip()
+                if cmd:
+                    self._fire_sport_command(cmd)
+
+            lc.subscribe("/ow/sport_request", _handler)
+            log.info("surveillance.sport_request_subscribed")
+            while True:
+                try:
+                    lc.handle_timeout(200)
+                except Exception:  # noqa: BLE001
+                    return
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-sport-listener",
+        ).start()
+
+    def _start_walk_mode_primer(self) -> None:
+        """After startup, put the Go2 into a state where the
+        WIRELESS_CONTROLLER joystick (driven by our cmd_vel pipeline)
+        actually walks the dog instead of adjusting body posture.
+
+        The full sequence comes from reading dimos's `enable_rage_mode`
+        in unitree/connection.py — the bit that makes joystick walking
+        work isn't FreeWalk, it's `SwitchJoystick(data=True)` (sport
+        api_id 1027). Without it the dog stays in posture-control mode
+        on the left stick (W lifts the body, S lowers it).
+
+        Sequence:
+          1. BalanceStand (1002) — ensures the dog is standing/active.
+          2. FreeWalk (1045) — locomotion mode (walk vs trot).
+          3. SwitchJoystick(data=True) (1027) — the actual "stick →
+             walking" toggle. THIS is the missing piece.
+
+        Real-world symptom this fixes: operator presses W on the
+        dashboard, robot's body lifts up but legs don't step.
+        """
+        import threading
+        import time
+
+        def _run() -> None:
+            # Wait for dimos's own init to settle. GO2Connection.start
+            # does StandUp + BalanceStand at ~T+3s; we want to be
+            # comfortably after that so our sport commands don't race.
+            time.sleep(8)
+            steps = [
+                ("BalanceStand", None),
+                ("FreeWalk", None),
+                ("SwitchJoystick", {"data": True}),
+            ]
+            for cmd, param in steps:
+                if self._fire_sport_command(cmd, parameter=param):
+                    time.sleep(1.5)
+                else:
+                    log.warning("surveillance.walk_mode_step_failed", step=cmd)
+            log.info("surveillance.walk_mode_primed")
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-walk-primer",
         ).start()
 
     def _start_core_tick_thread(self) -> None:

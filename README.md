@@ -107,6 +107,7 @@ Inherited from Overwatch v1. Single accent (`#F59E0B` amber), JetBrains Mono num
 - **`IP address must be provided`** (sim path) — set `OV_SIM=1` (or use `make sim` which does it) so the blueprint sets `global_config.simulation = True` and dimos swaps in MujocoConnection.
 - **`Missing required tools: git-lfs`** — install git-lfs (see prereqs). dimos's SpatialMemory and SecurityModule download model weights through git-lfs on first launch.
 - **LCM events not flowing into the bridge** — check that `LCM_URL`'s multicast group is reachable from the bridge container. On Linux you may need `network_mode: host` (already set in compose).
+- **No video on macOS (`make sim` runs but the dashboard tile is blank)** — macOS doesn't route multicast (`239.255.76.67`) over loopback by default, so the blueprint's JPEG frames never reach ov-bridge. Fix once per boot with `make mac-multicast-route`.
 - **Telegram bot idle** — set a token in *Settings → Telegram*; the bot polls SQLite for it and hot-reloads within 30s.
 - **Dashboard shows OFFLINE** — bridge is not seeing `/ow/robot_state` events. Check `make logs SVC=ov-bridge`.
 - **MCP tool calls failing** — the bot's `MCP_URL` must reach the robot's `:9990/mcp` endpoint. From inside Docker that's usually `http://host.docker.internal:9990/mcp`.
