@@ -3,21 +3,19 @@ import { useEffect, useRef, useState } from 'react';
 import { useLiveStatus } from '@/components/LiveStatus';
 
 /**
- * Game-style robot teleop.
+ * Game-style robot teleop using velocity commands.
  *
- * Reality check: dimos's `relative_move` is goal-based, not velocity-
- * based, so we can't stream a true cmd_vel from the browser without
- * wiring a new transport. Instead we fire short overlapping
- * `relative_move` steps while a key (or button) is held — each tick
- * commits the next ~0.15m step. The robot is allowed to start the
- * next step before the previous one fully settles, so motion feels
- * continuous enough for a Go2.
+ * Each tick publishes a Twist on `/cmd_vel` (linear x/y, angular z).
+ * The Go2's `cmd_vel_timeout = 0.2s` means the robot auto-halts the
+ * moment we stop publishing — no explicit stop-on-release needed and
+ * no goal-replanning sway from `relative_move`.
  *
  * Bindings:
  *   W / ↑ = forward       S / ↓ = back
  *   A      = strafe left   D     = strafe right
  *   ← / Q  = rotate CCW    → / E = rotate CW
- *   space  = stop          shift = sprint (1.5× step)
+ *   space  = emergency-stop (zero-twist)
+ *   shift  = sprint (1.6× speed)
  *
  * Keys are ignored when the operator is typing in an input/textarea
  * so naming a waypoint doesn't accidentally drive the robot.
@@ -43,9 +41,13 @@ const KEY_MAP: Record<string, Dir> = {
   ArrowRight: 'rotR',
 };
 
-const TICK_MS = 220;
-const STEP_M = 0.18;
-const TURN_DEG = 18;
+// Velocity teleop: publish a Twist every TICK_MS while held. Has to be
+// well under Go2's cmd_vel_timeout (200 ms) so the robot doesn't
+// repeatedly auto-stop mid-motion.
+const TICK_MS = 100;
+const LINEAR_SPEED = 0.4; // m/s — dimos KeyboardTeleop default
+const ANGULAR_SPEED = 0.8; // rad/s
+const SPRINT_MULT = 1.6;
 
 export function ManualDrive() {
   const { online } = useLiveStatus();
@@ -83,15 +85,15 @@ export function ManualDrive() {
     });
   }
 
-  async function sendMove(forward: number, left: number, degrees: number) {
-    if (inFlightRef.current) return; // Skip overlapping; robot will be commanded next tick.
+  async function sendVel(linear_x: number, linear_y: number, angular_z: number) {
+    if (inFlightRef.current) return; // Skip overlapping; next tick will publish.
     inFlightRef.current = true;
     try {
-      const res = await fetch('/api/surveillance/move', {
+      const res = await fetch('/api/surveillance/cmd_vel', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ forward, left, degrees }),
+        body: JSON.stringify({ linear_x, linear_y, angular_z }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -108,23 +110,20 @@ export function ManualDrive() {
 
   async function halt() {
     setHeld(new Set());
-    try {
-      await fetch('/api/surveillance/halt', {
-        method: 'POST',
-        credentials: 'include',
-      });
-      setMsg('stopped');
-    } catch {
-      /* ignore */
-    }
+    // Bypass the in-flight guard so the stop always lands.
+    inFlightRef.current = false;
+    sendVel(0, 0, 0);
   }
 
-  // Ticker: while any direction is held, fire a step every TICK_MS.
+  // Ticker: while any direction is held, fire a Twist every TICK_MS.
   useEffect(() => {
     if (held.size === 0) {
       if (tickerRef.current) {
         clearInterval(tickerRef.current);
         tickerRef.current = null;
+        // Explicit zero-twist on release so the robot halts instantly
+        // rather than waiting for its 200ms cmd_vel watchdog.
+        sendVel(0, 0, 0);
       }
       return;
     }
@@ -132,17 +131,17 @@ export function ManualDrive() {
     const tick = () => {
       const s = heldRef.current;
       if (s.size === 0) return;
-      const mult = sprintRef.current ? 1.5 : 1;
-      let fwd = 0;
-      let lft = 0;
-      let deg = 0;
-      if (s.has('fwd')) fwd += STEP_M * mult;
-      if (s.has('back')) fwd -= STEP_M * mult;
-      if (s.has('left')) lft += STEP_M * mult;
-      if (s.has('right')) lft -= STEP_M * mult;
-      if (s.has('rotL')) deg += TURN_DEG * mult;
-      if (s.has('rotR')) deg -= TURN_DEG * mult;
-      if (fwd !== 0 || lft !== 0 || deg !== 0) sendMove(fwd, lft, deg);
+      const mult = sprintRef.current ? SPRINT_MULT : 1;
+      let lx = 0;
+      let ly = 0;
+      let az = 0;
+      if (s.has('fwd')) lx += LINEAR_SPEED * mult;
+      if (s.has('back')) lx -= LINEAR_SPEED * mult;
+      if (s.has('left')) ly += LINEAR_SPEED * mult;
+      if (s.has('right')) ly -= LINEAR_SPEED * mult;
+      if (s.has('rotL')) az += ANGULAR_SPEED * mult;
+      if (s.has('rotR')) az -= ANGULAR_SPEED * mult;
+      if (lx !== 0 || ly !== 0 || az !== 0) sendVel(lx, ly, az);
     };
     tick(); // fire one immediately
     tickerRef.current = setInterval(tick, TICK_MS);

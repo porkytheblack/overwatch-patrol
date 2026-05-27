@@ -100,6 +100,30 @@ async def mjpeg_handler(req: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def cmd_vel_handler(req: web.Request) -> web.Response:
+    """Publish a velocity command on `/cmd_vel`.
+
+    Body: {"linear_x": float, "linear_y": float, "angular_z": float}.
+    No auth here — the bridge sits on the trusted plane behind ov-api
+    (which gates this route with requireAuth).
+    """
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    publisher = req.app.get("cmd_vel")
+    if publisher is None:
+        return web.json_response({"error": "publisher_unavailable"}, status=503)
+    ok = publisher.publish(
+        float(payload.get("linear_x", 0)),
+        float(payload.get("linear_y", 0)),
+        float(payload.get("angular_z", 0)),
+    )
+    if not ok:
+        return web.json_response({"error": "lcm_unavailable"}, status=503)
+    return web.json_response({"ok": True})
+
+
 async def waypoint_sync_handler(req: web.Request) -> web.Response:
     """Internal RPC: called by `SurveillanceModule.add_waypoint` /
     `delete_waypoint` to upsert/delete a row. Mirrors the body of an LCM
@@ -124,15 +148,18 @@ async def waypoint_sync_handler(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def make_app(hub: WsHub, storage=None, frames=None) -> web.Application:
+def make_app(hub: WsHub, storage=None, frames=None, cmd_vel=None) -> web.Application:
     app = web.Application()
     app["hub"] = hub
     if storage is not None:
         app["storage"] = storage
     if frames is not None:
         app["frames"] = frames
+    if cmd_vel is not None:
+        app["cmd_vel"] = cmd_vel
     app.router.add_get("/events", ws_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/sync/waypoint", waypoint_sync_handler)
+    app.router.add_post("/cmd_vel", cmd_vel_handler)
     app.router.add_get("/video_feed/color_image", mjpeg_handler)
     return app

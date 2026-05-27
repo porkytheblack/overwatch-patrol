@@ -78,6 +78,37 @@ const MoveBody = z.object({
   degrees: z.number().min(-360).max(360).default(0),
 });
 
+const CmdVelBody = z.object({
+  linear_x: z.number().min(-2).max(2).default(0),
+  linear_y: z.number().min(-2).max(2).default(0),
+  angular_z: z.number().min(-3).max(3).default(0),
+});
+
+/**
+ * Velocity teleop — proxies to ov-bridge which publishes an LCM Twist.
+ * The dashboard streams at ~10 Hz while a key is held; Go2's
+ * `cmd_vel_timeout=0.2s` auto-halts the moment we stop publishing, so
+ * there's no `release` event to handle.
+ */
+app.post('/cmd_vel', requireAuth, zValidator('json', CmdVelBody), async (c) => {
+  const body = c.req.valid('json');
+  try {
+    const res = await fetch(`${ENV.BRIDGE_HTTP_URL}/cmd_vel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return c.json({ error: 'bridge_error', detail: text.slice(0, 200) }, 502);
+    }
+    return c.json({ ok: true });
+  } catch (e) {
+    log.warn('cmd_vel.bridge_unreachable', { err: String(e) });
+    return c.json({ error: 'bridge_unreachable' }, 502);
+  }
+});
+
 /** Manual drive — small relative_move steps so click-spam stays safe. */
 app.post('/move', requireAuth, zValidator('json', MoveBody), async (c) => {
   const args = c.req.valid('json');
