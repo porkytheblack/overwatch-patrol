@@ -130,3 +130,19 @@ export const retentionPolicies = sqliteTable('retention_policies', {
   kind: text('kind').notNull(),
   retention_days: integer('retention_days').notNull(),
 });
+
+export const claimCodes = sqliteTable(
+  'claim_codes',
+  {
+    code: text('code').primaryKey(),
+    chat_id: text('chat_id').notNull(),
+    chat_handle: text('chat_handle'),
+    created_at: text('created_at').notNull(),
+    expires_at: text('expires_at').notNull(),
+    claimed_at: text('claimed_at'),
+  },
+  (t) => ({
+    chatIdIdx: index('idx_claim_codes_chat_id').on(t.chat_id),
+    expiresAtIdx: index('idx_claim_codes_expires_at').on(t.expires_at),
+  }),
+);
