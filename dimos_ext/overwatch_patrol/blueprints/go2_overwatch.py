@@ -127,6 +127,39 @@ def main() -> None:
     sqlite_path = os.environ.get("SQLITE_PATH", "/data/overwatch.db")
     clip_dir = os.environ.get("CLIP_DIR", "/data/clips")
 
+    # /data/* paths are Docker-mounted in compose, non-existent on a Mac
+    # host. Mirror the same remap the bridge does (ov-bridge/config.py)
+    # so `make sim` / `make robot` on a developer Mac just works.
+    def _remap_data_path(p: str) -> str:
+        if not (p.startswith("/data/") or p == "/data"):
+            return p
+        # /data isn't writable here → use <repoRoot>/data/<basename or rest>
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            if (parent / "pnpm-workspace.yaml").exists():
+                repo_root = parent
+                break
+        else:
+            repo_root = Path.cwd()
+        rest = p[len("/data/"):] if p.startswith("/data/") else ""
+        remapped = repo_root / "data" / rest
+        try:
+            remapped.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        sys.stderr.write(
+            f"[blueprint] remapped {p!r} → {str(remapped)!r}\n",
+        )
+        return str(remapped)
+
+    if not os.access("/data", os.W_OK):
+        sqlite_path = _remap_data_path(sqlite_path)
+        clip_dir = _remap_data_path(clip_dir)
+    # Expose the remapped paths to child threads / modules through env
+    # so `_load_waypoints_from_sqlite` and any other consumer agrees.
+    os.environ["SQLITE_PATH"] = sqlite_path
+    os.environ["CLIP_DIR"] = clip_dir
+
     # TTS selection — agent always gets a `speak(...)` tool:
     #   OPENAI_API_KEY set → dimos SpeakSkill (cloud, high-quality voice)
     #   otherwise          → LocalSpeakSkill (offline, OS native TTS)
