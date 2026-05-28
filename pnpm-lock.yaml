@@ -104,6 +104,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.6.1
         version: 1.8.0
+      '@overwatch/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
       '@overwatch/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas

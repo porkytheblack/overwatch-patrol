@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { resolveAgentProvider } from '@overwatch/agent';
 
 // Load .env from the repo root so `pnpm migrate`, `pnpm seed`, and `tsx watch`
 // all see operator-supplied secrets without any extra flags. In Docker
@@ -105,6 +106,25 @@ const env = z
     PORT: z.coerce.number().int().positive().default(3000),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     DATA_DIR: z.string().default('/data'),
+
+    // ── Agent provider selection ────────────────────────────────────────────
+    // Mirrors ov-telegram's resolver. PROVIDER is optional; when unset,
+    // we auto-pick OpenRouter → Anthropic → OpenAI → Gemini based on
+    // which API key is present. Without any key the dashboard agent
+    // panel surfaces "agent offline · no provider configured" rather
+    // than crashing.
+    PROVIDER: z.enum(['openrouter', 'anthropic', 'openai', 'gemini', 'bedrock']).optional(),
+    OPENROUTER_API_KEY: z.string().min(1).optional(),
+    ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    OPENAI_API_KEY: z.string().min(1).optional(),
+    GEMINI_API_KEY: z.string().min(1).optional(),
+    MODEL: z.string().default(''),
+
+    // ── ElevenLabs voice (dashboard push-to-talk panel) ─────────────────────
+    // Optional. When ELEVENLABS_API_KEY is unset the voice routes return
+    // 500 and the dashboard panel disables itself.
+    ELEVENLABS_API_KEY: z.string().min(1).optional(),
+    ELEVENLABS_VOICE_ID: z.string().default('JBFqnCBsd6RMkjVDRZzb'),
   })
   .parse(stripped);
 
@@ -117,5 +137,8 @@ export const ENV = {
   MCP_URL: remapDockerHost(env.MCP_URL, 'MCP_URL') ?? env.MCP_URL,
   BRIDGE_HTTP_URL:
     remapDockerHost(env.BRIDGE_HTTP_URL, 'BRIDGE_HTTP_URL') ?? env.BRIDGE_HTTP_URL,
+  /** Resolved LLM config for the dashboard's agent panel — null if no
+   *  provider is configured. Shares the auto-pick logic with ov-telegram. */
+  AGENT: resolveAgentProvider(stripped),
 };
 export type Env = typeof ENV;
