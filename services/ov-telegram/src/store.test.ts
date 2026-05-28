@@ -1,15 +1,21 @@
-import { describe, expect, it, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+/**
+ * Smoke test that ov-telegram can still drive the conversation store
+ * after the move into `@overwatch/agent`. The package itself owns the
+ * deep coverage in `packages/agent/src/agent.test.ts`; this file just
+ * verifies the channel-bound ConversationStore behaves identically for
+ * the Telegram side after the constructor migration.
+ */
+import { afterAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { schema } from '@overwatch/shared-ts';
+import { ConversationStore } from '@overwatch/agent';
 
 const tmp = mkdtempSync(join(tmpdir(), 'ov-telegram-store-'));
 const dbPath = join(tmp, 'test.db');
-
-process.env.SQLITE_PATH = dbPath;
-process.env.DEEP_LINK_SECRET = 'test-deep-link-secret-1234567';
-process.env.LOG_LEVEL = 'error';
 
 const sqlite = new Database(dbPath);
 sqlite.pragma('foreign_keys = ON');
@@ -35,28 +41,28 @@ sqlite
     null,
     new Date().toISOString(),
   );
-sqlite.close();
 
-const { TelegramStore } = await import('./store.js');
+const db = drizzle(sqlite, { schema });
 
 afterAll(() => {
+  sqlite.close();
   rmSync(tmp, { recursive: true, force: true });
 });
 
-describe('TelegramStore', () => {
+describe('ConversationStore (telegram channel)', () => {
   it('creates a fresh row on first use', async () => {
-    const s = new TelegramStore('fresh-chat');
+    const s = new ConversationStore(db, 'telegram', 'fresh-chat');
     expect(await s.getMessages()).toEqual([]);
     expect(await s.getTokenCount()).toBe(0);
   });
 
   it('round-trips appended messages', async () => {
-    const s = new TelegramStore('rt-chat');
+    const s = new ConversationStore(db, 'telegram', 'rt-chat');
     await s.appendMessages([
       { sender: 'user', text: 'what is the robot doing' },
       { sender: 'agent', text: 'PATROLLING' },
     ]);
-    const s2 = new TelegramStore('rt-chat');
+    const s2 = new ConversationStore(db, 'telegram', 'rt-chat');
     const msgs = await s2.getMessages();
     expect(msgs).toHaveLength(2);
     expect(msgs[0]).toMatchObject({ sender: 'user', text: 'what is the robot doing' });
@@ -64,10 +70,10 @@ describe('TelegramStore', () => {
   });
 
   it('caps history at the last 20 turns', async () => {
-    const s = new TelegramStore('cap-chat');
+    const s = new ConversationStore(db, 'telegram', 'cap-chat');
     const big: Array<{ sender: 'user' | 'agent'; text: string }> = [];
     for (let i = 0; i < 25; i++) big.push({ sender: 'user', text: `m${i}` });
-    await s.appendMessages(big as never);
+    await s.appendMessages(big);
     const msgs = await s.getMessages();
     expect(msgs).toHaveLength(20);
     expect(msgs[0].text).toBe('m5'); // first 5 dropped
@@ -75,7 +81,7 @@ describe('TelegramStore', () => {
   });
 
   it('migrates legacy {role, content} rows to {sender, text}', async () => {
-    const s = new TelegramStore('legacy-chat');
+    const s = new ConversationStore(db, 'telegram', 'legacy-chat');
     const msgs = await s.getMessages();
     expect(msgs).toEqual([
       { sender: 'user', text: 'hello' },
@@ -84,15 +90,20 @@ describe('TelegramStore', () => {
   });
 
   it('pending-confirmation getter / setter persist', () => {
-    const s = new TelegramStore('confirm-chat');
+    const s = new ConversationStore(db, 'telegram', 'confirm-chat');
     expect(s.getPendingConfirmation()).toBeNull();
-    s.setPendingConfirmation({ tool: 'robot__execute_sport_command', args: { command_name: 'Backflip' } });
-    const s2 = new TelegramStore('confirm-chat');
+    s.setPendingConfirmation({
+      tool: 'robot__execute_sport_command',
+      args: { command_name: 'Backflip' },
+    });
+    const s2 = new ConversationStore(db, 'telegram', 'confirm-chat');
     expect(s2.getPendingConfirmation()).toEqual({
       tool: 'robot__execute_sport_command',
       args: { command_name: 'Backflip' },
     });
     s2.setPendingConfirmation(null);
-    expect(new TelegramStore('confirm-chat').getPendingConfirmation()).toBeNull();
+    expect(
+      new ConversationStore(db, 'telegram', 'confirm-chat').getPendingConfirmation(),
+    ).toBeNull();
   });
 });

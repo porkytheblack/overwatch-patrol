@@ -208,6 +208,9 @@ importers:
 
   services/ov-telegram:
     dependencies:
+      '@overwatch/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
       '@overwatch/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas
