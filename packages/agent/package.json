@@ -1,0 +1,29 @@
+{
+  "name": "@overwatch/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@overwatch/schemas": "workspace:*",
+    "@overwatch/shared-ts": "workspace:*",
+    "drizzle-orm": "^0.36.4",
+    "glove-core": "3.0.0",
+    "glove-mcp": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.9.0",
+    "better-sqlite3": "^11.5.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

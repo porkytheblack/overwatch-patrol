@@ -15,6 +15,40 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
+  packages/agent:
+    dependencies:
+      '@overwatch/schemas':
+        specifier: workspace:*
+        version: link:../schemas
+      '@overwatch/shared-ts':
+        specifier: workspace:*
+        version: link:../shared-ts
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/better-sqlite3@7.6.13)(@types/react@18.3.29)(better-sqlite3@11.10.0)(react@18.3.1)
+      glove-core:
+        specifier: 3.0.0
+        version: 3.0.0(ws@8.21.0)
+      glove-mcp:
+        specifier: ^0.5.0
+        version: 0.5.0(ws@8.21.0)
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.19
+      better-sqlite3:
+        specifier: ^11.5.0
+        version: 11.10.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.5
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/schemas:
     dependencies:
       drizzle-orm:
