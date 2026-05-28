@@ -79,6 +79,32 @@ export const openapi = {
         summary: 'Aggregate system status (robot, bridge connection, last LCM event)',
       },
     },
+    '/api/agent/message': {
+      post: { summary: 'Send a message to the dashboard agent (buffered reply)' },
+    },
+    '/api/agent/stream': {
+      post: { summary: 'Send a message to the dashboard agent (SSE stream)' },
+    },
+    '/api/agent/confirm': {
+      post: { summary: 'Approve (y) or cancel (n) a pending confirmation-required tool call' },
+    },
+    '/api/agent/history': {
+      get: {
+        summary: 'Conversation history + any pending confirmation',
+        parameters: [
+          { name: 'limit', in: 'query', schema: { type: 'integer' } },
+        ],
+      },
+    },
+    '/api/agent/reset': {
+      post: { summary: 'Evict the cached agent for this operator (persistence stays)' },
+    },
+    '/api/voice/stt-token': {
+      get: { summary: 'Mint an ElevenLabs realtime STT single-use token' },
+    },
+    '/api/voice/tts-token': {
+      get: { summary: 'Mint an ElevenLabs websocket TTS single-use token (returns voice id)' },
+    },
     '/ws': {
       get: { summary: 'WebSocket event firehose (mirrors `/events` for compatibility)' },
     },
