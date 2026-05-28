@@ -61,16 +61,40 @@ async function callMcp(name: string, args: Record<string, unknown> = {}): Promis
   return { ok: !body.result?.isError, text: text.slice(0, 400), status: 200 };
 }
 
-async function handleAction(c: any, name: string) {
-  const r = await callMcp(name);
-  if (!r.ok) return c.json({ error: r.text }, r.status as 200 | 502);
-  return c.json({ ok: true, message: r.text });
+/**
+ * Patrol state-machine commands. Routed through the bridge's
+ * `/patrol` endpoint (LCM `/ow/patrol_command`) — SurveillanceModule
+ * subscribes and pokes its core directly.
+ *
+ * We used to call MCP `start_surveillance` / `stop_surveillance` /
+ * `pause_patrol` / `resume_patrol` here, but the dimos RPC backplane
+ * hangs for up to 120s on the cellular relay path, freezing the
+ * dashboard's PatrolControls button until the operator refreshes.
+ * The MCP @skills still exist for the Telegram agent — the dashboard
+ * just doesn't go through them anymore.
+ */
+async function patrolAction(c: any, action: 'start' | 'stop' | 'pause' | 'resume') {
+  try {
+    const res = await fetch(`${ENV.BRIDGE_HTTP_URL}/patrol`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return c.json({ error: 'bridge_error', detail: text.slice(0, 200) }, 502);
+    }
+    return c.json({ ok: true, message: `${action} sent` });
+  } catch (e) {
+    log.warn('patrol.bridge_unreachable', { err: String(e), action });
+    return c.json({ error: 'bridge_unreachable' }, 502);
+  }
 }
 
-app.post('/start', requireAuth, (c) => handleAction(c, 'start_surveillance'));
-app.post('/stop', requireAuth, (c) => handleAction(c, 'stop_surveillance'));
-app.post('/pause', requireAuth, (c) => handleAction(c, 'pause_patrol'));
-app.post('/resume', requireAuth, (c) => handleAction(c, 'resume_patrol'));
+app.post('/start', requireAuth, (c) => patrolAction(c, 'start'));
+app.post('/stop', requireAuth, (c) => patrolAction(c, 'stop'));
+app.post('/pause', requireAuth, (c) => patrolAction(c, 'pause'));
+app.post('/resume', requireAuth, (c) => patrolAction(c, 'resume'));
 
 const MoveBody = z.object({
   forward: z.number().min(-2).max(2).default(0),

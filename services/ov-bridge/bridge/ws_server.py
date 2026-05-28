@@ -100,6 +100,27 @@ async def mjpeg_handler(req: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def patrol_request_handler(req: web.Request) -> web.Response:
+    """Publish a patrol state-machine command on /ow/patrol_command.
+
+    Body: `{"action": "start"|"stop"|"pause"|"resume"}`. SurveillanceModule
+    subscribes and flips `core.ctx.state` directly — bypassing MCP's
+    RPC backplane that hangs at 120s on the cellular relay path.
+    Mirrors the sport-command bypass.
+    """
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    action = str(payload.get("action", "")).strip().lower()
+    publisher = req.app.get("patrol_pub")
+    if publisher is None:
+        return web.json_response({"error": "publisher_unavailable"}, status=503)
+    if not publisher.publish_action(action):
+        return web.json_response({"error": "invalid_action_or_lcm_unavailable"}, status=400)
+    return web.json_response({"ok": True, "action": action})
+
+
 async def sport_request_handler(req: web.Request) -> web.Response:
     """Publish a Go2 sport command on /ow/sport_request as std_msgs.String JSON.
 
@@ -174,7 +195,12 @@ async def waypoint_sync_handler(req: web.Request) -> web.Response:
 
 
 def make_app(
-    hub: WsHub, storage=None, frames=None, cmd_vel=None, sport_pub=None,
+    hub: WsHub,
+    storage=None,
+    frames=None,
+    cmd_vel=None,
+    sport_pub=None,
+    patrol_pub=None,
 ) -> web.Application:
     app = web.Application()
     app["hub"] = hub
@@ -186,10 +212,13 @@ def make_app(
         app["cmd_vel"] = cmd_vel
     if sport_pub is not None:
         app["sport_pub"] = sport_pub
+    if patrol_pub is not None:
+        app["patrol_pub"] = patrol_pub
     app.router.add_get("/events", ws_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/sync/waypoint", waypoint_sync_handler)
     app.router.add_post("/cmd_vel", cmd_vel_handler)
     app.router.add_post("/sport", sport_request_handler)
+    app.router.add_post("/patrol", patrol_request_handler)
     app.router.add_get("/video_feed/color_image", mjpeg_handler)
     return app

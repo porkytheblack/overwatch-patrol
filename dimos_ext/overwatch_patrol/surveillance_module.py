@@ -178,6 +178,7 @@ class SurveillanceModule(Module):
         self._start_core_tick_thread()
         self._start_fall_recovery_watcher()
         self._start_sport_request_listener()
+        self._start_patrol_command_listener()
         # Walk-mode toggle is now handled by GO2Connection itself —
         # the blueprint composes it with mode="rage" so dimos fires
         # rage_mode + SwitchJoystick during connection.start(). No
@@ -360,6 +361,80 @@ class SurveillanceModule(Module):
 
         threading.Thread(
             target=_run, daemon=True, name="surveillance-sport-listener",
+        ).start()
+
+    def _start_patrol_command_listener(self) -> None:
+        """Subscribe to `/ow/patrol_command` LCM events and flip the
+        SurveillanceCore state machine directly.
+
+        Bypasses MCP `start_surveillance` / `stop_surveillance` /
+        `pause_patrol` / `resume_patrol` — those still exist as @skills
+        for the Telegram agent, but the dashboard talks LCM-only.
+        Payload: `{"action": "start"|"stop"|"pause"|"resume"}`.
+
+        Same rationale as the sport bypass: dimos's RPC backplane hangs
+        for up to 120s on the 4G relay path, freezing the dashboard
+        when the operator clicks STOP. Direct state-machine pokes are
+        sub-millisecond.
+        """
+        import threading
+
+        def _run() -> None:
+            try:
+                import lcm  # type: ignore
+                from dimos_lcm.std_msgs.String import String  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                log.warning("surveillance.patrol_lcm_missing", error=str(e))
+                return
+
+            lc = lcm.LCM(
+                os.environ.get("LCM_URL", "udpm://239.255.76.67:7667?ttl=1"),
+            )
+
+            actions = {
+                "start": self.core.start_surveillance,
+                "stop": self.core.stop_surveillance,
+                "pause": self.core.pause_patrol,
+                "resume": self.core.resume_patrol,
+            }
+
+            def _handler(_ch: str, data: bytes) -> None:
+                try:
+                    msg = String.lcm_decode(data)
+                    payload = json.loads(msg.data)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.patrol_decode_fail", error=str(e))
+                    return
+                action = str(payload.get("action", "")).strip().lower()
+                fn = actions.get(action)
+                if fn is None:
+                    log.warning("surveillance.patrol_unknown_action", action=action)
+                    return
+                try:
+                    result = fn()
+                    log.info(
+                        "surveillance.patrol_action_applied",
+                        action=action,
+                        state=self.core.ctx.state.value,
+                        result=str(result)[:200],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "surveillance.patrol_action_fail",
+                        action=action,
+                        error=str(e),
+                    )
+
+            lc.subscribe("/ow/patrol_command", _handler)
+            log.info("surveillance.patrol_command_subscribed")
+            while True:
+                try:
+                    lc.handle_timeout(200)
+                except Exception:  # noqa: BLE001
+                    return
+
+        threading.Thread(
+            target=_run, daemon=True, name="surveillance-patrol-listener",
         ).start()
 
     def _start_walk_mode_primer(self) -> None:
