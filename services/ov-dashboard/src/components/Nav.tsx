@@ -6,6 +6,10 @@ const items = [
   { href: '/', label: 'OVERVIEW' },
   { href: '/patrol', label: 'PATROL' },
   { href: '/incidents', label: 'INCIDENTS' },
+  // Operator workflow: status → talk to the agent → handle incidents → review.
+  // CONVERSATION sits next to INCIDENTS so the natural "see something, ask
+  // about it" handoff is a single column hop.
+  { href: '/conversation', label: 'CONVERSATION' },
   { href: '/calendar', label: 'CALENDAR' },
   { href: '/settings', label: 'SETTINGS' },
 ];

@@ -11,8 +11,10 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@overwatch/agent": "workspace:*",
     "@overwatch/schemas": "workspace:*",
     "@overwatch/shared-ts": "workspace:*",
+    "glove-voice": "3.0.0",
     "next": "^14.2.18",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
