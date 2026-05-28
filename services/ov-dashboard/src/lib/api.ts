@@ -1,6 +1,10 @@
+// Server-side default targets the host-mode setup (`make dev-host`),
+// which is the path operators hit outside docker. docker-compose sets
+// OV_API_URL=http://ov-api:3000 explicitly for in-container runs, so
+// the docker path is unaffected.
 export const API_BASE =
   typeof window === 'undefined'
-    ? (process.env.OV_API_URL ?? 'http://ov-api:3000')
+    ? (process.env.OV_API_URL ?? 'http://localhost:3000')
     : '';
 
 /**
