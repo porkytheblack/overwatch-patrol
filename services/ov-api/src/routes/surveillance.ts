@@ -74,11 +74,15 @@ async function callMcp(name: string, args: Record<string, unknown> = {}): Promis
  * just doesn't go through them anymore.
  */
 async function patrolAction(c: any, action: 'start' | 'stop' | 'pause' | 'resume') {
+  // Same 3s ceiling as /sport — bridge is fire-and-forget.
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 3000);
   try {
     const res = await fetch(`${ENV.BRIDGE_HTTP_URL}/patrol`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action }),
+      signal: ctrl.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -86,8 +90,14 @@ async function patrolAction(c: any, action: 'start' | 'stop' | 'pause' | 'resume
     }
     return c.json({ ok: true, message: `${action} sent` });
   } catch (e) {
-    log.warn('patrol.bridge_unreachable', { err: String(e), action });
-    return c.json({ error: 'bridge_unreachable' }, 502);
+    const aborted = (e as { name?: string })?.name === 'AbortError';
+    log.warn('patrol.bridge_unreachable', { err: String(e), aborted, action });
+    return c.json(
+      { error: aborted ? 'bridge_timeout' : 'bridge_unreachable' },
+      502,
+    );
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -170,11 +180,18 @@ const SportBody = z.object({
  */
 app.post('/sport', requireAuth, zValidator('json', SportBody), async (c) => {
   const { command } = c.req.valid('json');
+  // Hard 3s ceiling on the bridge call. The bridge endpoint itself
+  // is fire-and-forget (just publishes to LCM), so a healthy roundtrip
+  // is <50ms. Anything longer means the bridge is wedged and we don't
+  // want to hold the dashboard's HTTP connection waiting.
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 3000);
   try {
     const res = await fetch(`${ENV.BRIDGE_HTTP_URL}/sport`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command }),
+      signal: ctrl.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -182,8 +199,14 @@ app.post('/sport', requireAuth, zValidator('json', SportBody), async (c) => {
     }
     return c.json({ ok: true, message: `${command} sent` });
   } catch (e) {
-    log.warn('sport.bridge_unreachable', { err: String(e) });
-    return c.json({ error: 'bridge_unreachable' }, 502);
+    const aborted = (e as { name?: string })?.name === 'AbortError';
+    log.warn('sport.bridge_unreachable', { err: String(e), aborted });
+    return c.json(
+      { error: aborted ? 'bridge_timeout' : 'bridge_unreachable' },
+      502,
+    );
+  } finally {
+    clearTimeout(t);
   }
 });
 

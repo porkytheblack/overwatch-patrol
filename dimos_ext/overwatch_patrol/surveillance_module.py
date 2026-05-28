@@ -325,8 +325,24 @@ class SurveillanceModule(Module):
         """Subscribe to `/ow/sport_request` LCM events and fire them
         as sport commands. Payload: `{"command": "Hello"}` (or
         FreeWalk / BalanceStand / RecoveryStand / etc.).
+
+        Each command is dispatched to a worker thread because
+        `self._connection.publish_request(...)` is a cross-worker
+        dimos RPC that can stall for seconds while the dog ack's a
+        motor-mode change. If the LCM handler thread itself blocked
+        on that call, two button clicks in quick succession would
+        pile up — the second blocked until the first ack'd. With
+        worker dispatch the LCM thread stays free.
         """
         import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Small pool: 4 simultaneous in-flight sport commands is more
+        # than any operator workflow needs and caps how badly we can
+        # stack motor-mode changes if the dog is slow to ack.
+        executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="sport-cmd",
+        )
 
         def _run() -> None:
             try:
@@ -348,8 +364,12 @@ class SurveillanceModule(Module):
                     log.warning("surveillance.sport_decode_fail", error=str(e))
                     return
                 cmd = str(payload.get("command", "")).strip()
-                if cmd:
-                    self._fire_sport_command(cmd)
+                param = payload.get("parameter")
+                if not cmd:
+                    return
+                # Dispatch to the worker pool so the LCM thread doesn't
+                # block on the cross-worker RPC.
+                executor.submit(self._fire_sport_command, cmd, param)
 
             lc.subscribe("/ow/sport_request", _handler)
             log.info("surveillance.sport_request_subscribed")
@@ -398,18 +418,7 @@ class SurveillanceModule(Module):
                 "resume": self.core.resume_patrol,
             }
 
-            def _handler(_ch: str, data: bytes) -> None:
-                try:
-                    msg = String.lcm_decode(data)
-                    payload = json.loads(msg.data)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("surveillance.patrol_decode_fail", error=str(e))
-                    return
-                action = str(payload.get("action", "")).strip().lower()
-                fn = actions.get(action)
-                if fn is None:
-                    log.warning("surveillance.patrol_unknown_action", action=action)
-                    return
+            def _apply(action: str, fn: Any) -> None:
                 try:
                     result = fn()
                     log.info(
@@ -424,6 +433,28 @@ class SurveillanceModule(Module):
                         action=action,
                         error=str(e),
                     )
+
+            def _handler(_ch: str, data: bytes) -> None:
+                try:
+                    msg = String.lcm_decode(data)
+                    payload = json.loads(msg.data)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("surveillance.patrol_decode_fail", error=str(e))
+                    return
+                action = str(payload.get("action", "")).strip().lower()
+                fn = actions.get(action)
+                if fn is None:
+                    log.warning("surveillance.patrol_unknown_action", action=action)
+                    return
+                # Dispatch to a worker so the LCM handler thread stays free,
+                # even though core state transitions are cheap.
+                import threading as _th
+                _th.Thread(
+                    target=_apply,
+                    args=(action, fn),
+                    daemon=True,
+                    name=f"patrol-{action}",
+                ).start()
 
             lc.subscribe("/ow/patrol_command", _handler)
             log.info("surveillance.patrol_command_subscribed")
