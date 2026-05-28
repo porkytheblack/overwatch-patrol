@@ -143,10 +143,22 @@ dev-host: ensure-env
 	@echo "  stop: make host-down"
 
 host-down:
+	@# PID-file kill catches the most-recent parent. It does NOT catch the
+	@# tsx-spawned child node (which actually holds the port), nor parents
+	@# orphaned by an earlier `make dev-host` that overwrote this PID file.
 	@for f in $(HOST_LOGS)/*.pid; do \
-		[ -f "$$f" ] && kill "$$(cat $$f)" 2>/dev/null && echo "▸ stopped $$(basename $$f .pid)" || true; \
+		[ -f "$$f" ] && kill -9 "$$(cat $$f)" 2>/dev/null && echo "▸ stopped $$(basename $$f .pid)" || true; \
 		rm -f "$$f"; \
 	done
+	@# Sweep every tsx watcher + spawned child for our services regardless of
+	@# pid-file state. -9 because tsx's SIGTERM handler is flaky under detach.
+	@pkill -9 -f "services/ov-api/.*tsx.*watch src/index" 2>/dev/null || true
+	@pkill -9 -f "services/ov-telegram/.*tsx.*watch src/index" 2>/dev/null || true
+	@pkill -9 -f "ov-api/.*tsx@.*loader.*src/index" 2>/dev/null || true
+	@pkill -9 -f "ov-telegram/.*tsx@.*loader.*src/index" 2>/dev/null || true
+	@# Belt-and-braces: free :3000 directly if anything's still listening.
+	@pid=$$(lsof -nP -iTCP:3000 -sTCP:LISTEN -t 2>/dev/null); \
+		[ -n "$$pid" ] && kill -9 $$pid 2>/dev/null && echo "▸ freed :3000 ($$pid)" || true
 	@echo "✓ all host services stopped"
 
 logs:
