@@ -1,0 +1,234 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: #0a0a0a;
+    --bg-rgb: 10 10 10;
+    --surface: #141414;
+    --surface-elev: #1f1f1f;
+    --border: #262626;
+    --border-strong: #404040;
+    /* Blueprint guide lines — quieter than --border so they read as structure, not UI. */
+    --line: #1a1a1a;
+    --text: #e5e5e5;
+    --text-muted: #a3a3a3;
+    --text-dim: #525252;
+    --accent: #f59e0b;
+    --accent-rgb: 245 158 11;
+    --accent-strong: #fbbf24;
+    --accent-dim: #7c2d12;
+    --success: #10b981;
+    --danger: #ef4444;
+    /* Channel hues, used only as small identity marks inside chat mockups. */
+    --wa: #25d366;
+    --wa-rgb: 37 211 102;
+    --tg: #2aabee;
+    --tg-rgb: 42 171 238;
+    color-scheme: dark;
+  }
+  html {
+    background: var(--bg);
+    color: var(--text);
+    scroll-behavior: smooth;
+    scroll-padding-top: 72px;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--bg);
+    font-family: var(--font-inter), 'Inter', system-ui, sans-serif;
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+  ::selection { background: var(--accent); color: #000; }
+  :focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .mono { font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace; }
+  input[type='checkbox'] {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    border-radius: 0;
+    display: inline-block;
+    vertical-align: middle;
+    cursor: pointer;
+    flex: none;
+  }
+  input[type='checkbox']:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 2px var(--surface);
+  }
+  details > summary { list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+}
+
+@layer components {
+  .btn {
+    @apply h-10 px-4 inline-flex items-center justify-center gap-2 mono uppercase text-xs
+           border border-border-strong bg-transparent text-text whitespace-nowrap
+           hover:bg-surface-elev hover:border-text-dim transition-colors;
+    letter-spacing: 0.06em;
+  }
+  .btn-sm { @apply h-8 px-3 text-[11px]; }
+  .btn-lg { @apply h-12 px-6; }
+  .btn-primary {
+    @apply bg-accent text-black border-accent hover:bg-accent-strong hover:border-accent-strong;
+  }
+  .btn .arrow { transition: transform 150ms cubic-bezier(0,0,0.2,1); }
+  .btn:hover .arrow { transform: translateX(3px); }
+
+  .input, .select, .textarea {
+    @apply w-full px-3 bg-surface border border-border text-text text-sm
+           outline-none focus:border-accent transition-colors placeholder:text-text-dim;
+  }
+  .input, .select { @apply h-11; }
+  .textarea { @apply py-3 min-h-[112px] resize-y; }
+
+  .label {
+    @apply mono uppercase text-[11px] text-text-dim;
+    letter-spacing: 0.08em;
+  }
+  .eyebrow {
+    @apply mono uppercase text-[11px] text-text-muted inline-flex items-center gap-2;
+    letter-spacing: 0.12em;
+  }
+  .wordmark {
+    @apply mono uppercase font-medium text-text;
+    letter-spacing: 0.08em;
+  }
+
+  .pill {
+    @apply inline-flex items-center px-2 h-6 mono uppercase text-[10px] border whitespace-nowrap;
+    letter-spacing: 0.04em;
+  }
+  .pill-open       { @apply bg-accent text-black border-accent; }
+  .pill-inspecting { @apply text-accent border-accent; }
+  .pill-resolved   { @apply text-success border-success; }
+  .pill-ackd       { @apply text-success border-success; }
+  .pill-muted      { @apply text-text-muted border-border-strong; }
+  .pill-offline    { @apply text-danger border-danger; }
+
+  .pulse-dot {
+    width: 6px; height: 6px; background: var(--accent); flex: none;
+    animation: ow-pulse 2s ease-out infinite;
+  }
+
+  /* Small “+” registration marks at section corners, sitting on the guide lines. */
+  .reg { position: absolute; width: 9px; height: 9px; pointer-events: none; z-index: 1; display: none; }
+  /* Only once the 1280px frame has room on both sides; otherwise the marks hang off-screen. */
+  @media (min-width: 1300px) { .reg { display: block; } }
+  .reg::before, .reg::after { content: ''; position: absolute; background: var(--border-strong); }
+  .reg::before { left: 4px; top: 0; width: 1px; height: 9px; }
+  .reg::after  { top: 4px; left: 0; height: 1px; width: 9px; }
+
+  .dot-grid {
+    background-image: radial-gradient(var(--border) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+  .line-grid {
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .h-display {
+    @apply font-medium text-text;
+    font-size: clamp(2.6rem, 6.6vw, 5.75rem);
+    line-height: 0.98;
+    letter-spacing: -0.045em;
+  }
+  .h-section {
+    @apply font-medium text-text;
+    font-size: clamp(2rem, 4.4vw, 3.5rem);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+  }
+  .h-card {
+    @apply font-medium text-text;
+    font-size: 1.375rem;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    @apply text-text-muted;
+    font-size: clamp(1.0625rem, 1.4vw, 1.25rem);
+    line-height: 1.55;
+    letter-spacing: -0.005em;
+  }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .text-pretty { text-wrap: pretty; }
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+
+/* ---- Motion -------------------------------------------------------------- */
+
+@keyframes ow-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes ow-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@keyframes ow-scan { 0% { transform: translateY(-10%); } 100% { transform: translateY(1100%); } }
+@keyframes ow-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes ow-ping { 0% { transform: scale(1); opacity: 0.9; } 100% { transform: scale(3.2); opacity: 0; } }
+@keyframes ow-typing { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+@keyframes ow-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.marquee { animation: ow-marquee 60s linear infinite; }
+.scanline { animation: ow-scan 5s linear infinite; }
+.blink { animation: ow-blink 1.2s steps(1) infinite; }
+.ping { transform-box: fill-box; transform-origin: center; animation: ow-ping 2.4s cubic-bezier(0,0,0.2,1) infinite; }
+.typing-dot { animation: ow-typing 1.2s ease-in-out infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
+.msg-in { animation: ow-in 260ms cubic-bezier(0,0,0.2,1) both; }
+
+/* Only hidden when JS is present (html[data-js] is set by an inline head script). */
+html[data-js] [data-reveal] {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 700ms cubic-bezier(0.2,0.6,0.2,1), transform 700ms cubic-bezier(0.2,0.6,0.2,1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+html[data-js] [data-reveal][data-shown='true'] { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .marquee, .scanline, .blink, .ping, .pulse-dot, .typing-dot { animation: none !important; }
+  .msg-in { animation: none; }
+  html[data-js] [data-reveal] { opacity: 1; transform: none; transition: none; }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-strong); }
+
+/* Incident timeline: the amber progress line draws across once revealed. */
+.tl-progress {
+  transform-origin: left;
+  transition: transform 1800ms cubic-bezier(0.4,0,0.2,1) 300ms;
+}
+html[data-js] [data-reveal]:not([data-shown='true']) .tl-progress { transform: scaleX(0); }
+@media (prefers-reduced-motion: reduce) { .tl-progress { transition: none; } }
+
+/* Data-flow links in the architecture diagram: a dashed amber line that drifts. */
+@keyframes ow-flow-x { to { background-position: 12px 0; } }
+@keyframes ow-flow-y { to { background-position: 0 12px; } }
+.flow-x {
+  height: 1px;
+  background-image: linear-gradient(90deg, var(--accent) 50%, transparent 50%);
+  background-size: 12px 1px;
+  animation: ow-flow-x 900ms linear infinite;
+}
+.flow-y {
+  width: 1px;
+  background-image: linear-gradient(180deg, var(--accent) 50%, transparent 50%);
+  background-size: 1px 12px;
+  animation: ow-flow-y 900ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .flow-x, .flow-y { animation: none; } }
