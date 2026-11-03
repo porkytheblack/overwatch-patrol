@@ -75,7 +75,8 @@ overwatch-patrol/
 │   ├── ov-bridge/                # python · LCM → SQLite + WS
 │   ├── ov-api/                   # ts · hono · auth, CRUD, ws fan-out
 │   ├── ov-telegram/              # ts · telegram bot, glove agent w/ MCP
-│   └── ov-dashboard/             # next.js 14 · operator UI
+│   ├── ov-dashboard/             # next.js 14 · operator UI
+│   └── ov-site/                  # next.js 14 · public landing page
 ├── infra/caddy/
 └── scripts/
 ```
@@ -95,7 +96,12 @@ overwatch-patrol/
 | `make codegen`      | regenerate Pydantic events from zod                            |
 | `make migrate`      | apply SQLite migrations                                        |
 | `make e2e`          | synthetic-detector smoke test                                  |
+| `make site`         | landing page dev server on :3002                               |
 | `make dev-dimos DIMOS_PATH=../dimos` | editable install from a sibling dimos checkout    |
+
+## Landing page
+
+`services/ov-site` is the public sales page for installation and provisioning (control software, WhatsApp, Telegram + smart monitoring). It is a standalone Next.js app with no dependency on the robot or app stack, so it can be deployed anywhere Next.js runs. See [`services/ov-site/README.md`](./services/ov-site/README.md).
 
 ## Brand
 

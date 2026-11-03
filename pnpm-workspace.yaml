@@ -3,6 +3,7 @@ packages:
   - services/ov-api
   - services/ov-telegram
   - services/ov-dashboard
+  - services/ov-site
 
 onlyBuiltDependencies:
   - better-sqlite3

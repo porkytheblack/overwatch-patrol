@@ -1,4 +1,4 @@
-.PHONY: setup setup-sim ensure-env check-git-lfs robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos mac-multicast-route
+.PHONY: setup setup-sim ensure-env check-git-lfs robot sim dev dev-host down host-down logs seed reset codegen migrate e2e dev-dimos mac-multicast-route site
 
 SVC ?=
 
@@ -171,3 +171,7 @@ migrate: ensure-env
 
 e2e:
 	bash ./scripts/e2e.sh
+
+# Public landing page (services/ov-site) on http://localhost:3002.
+site:
+	pnpm -F @overwatch/site dev
